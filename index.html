@@ -167,18 +167,42 @@ window._fbResetPassword = async function(username) {
 window._fbGetAccountInfo = async function() {
   const user = _auth.currentUser;
   if (!user) return null;
+
+  // A verify-before-change completes out of band — the user clicks a link in
+  // their inbox, and Firebase swaps the address server-side. The cached user
+  // object knows nothing about it, so refresh before reporting any state.
+  try { await user.reload(); } catch(e) { /* keep going with cached values */ }
+
   let prof = null;
   try {
     const s = await getDoc(doc(_db, 'users', user.uid));
     if (s.exists()) prof = s.data();
   } catch(e) { /* profile is optional here */ }
+
+  // Reconcile a completed verification: once the live address matches what we
+  // recorded as pending, promote it to authEmail and clear the pending flag.
+  let pending = prof?.pendingAuthEmail || null;
+  const live  = (user.email || '');
+  if (pending && live.toLowerCase() === pending.toLowerCase()) {
+    const uname = window._currentUsername || prof?.username || null;
+    try {
+      await setDoc(doc(_db, 'users', user.uid),
+        { authEmail: live, hasRecoveryEmail: true, pendingAuthEmail: null }, { merge: true });
+      if (uname) {
+        await setDoc(doc(_db, 'usernames', uname),
+          { authEmail: live, pendingAuthEmail: null }, { merge: true });
+      }
+      pending = null;   // verification is done
+    } catch(e) { /* leave it pending; we'll retry on the next visit */ }
+  }
+
   return {
     uid:              user.uid,
     username:         window._currentUsername || prof?.username || null,
-    authEmail:        user.email || '',
-    isSynthetic:      (user.email || '').endsWith('@' + _SYNTH_DOMAIN),
+    authEmail:        live,
+    isSynthetic:      live.endsWith('@' + _SYNTH_DOMAIN),
     emailVerified:    !!user.emailVerified,
-    pendingAuthEmail: prof?.pendingAuthEmail || null,
+    pendingAuthEmail: pending,
     createdAt:        prof?.createdAt || null,
   };
 };
@@ -2280,7 +2304,10 @@ async function renderAccountPage() {
   let statusBox;
   if (info.pendingAuthEmail) {
     statusBox = `<div class="abox ainfo"><strong>Pending verification:</strong> ${esc(info.pendingAuthEmail)}<br>
-      Check that inbox and click the link to finish. Until then your current sign-in address still applies.</div>`;
+      Open that inbox — <strong>check your spam folder</strong>, these often land there — and click the link.
+      Until then your current sign-in address still applies.<br>
+      <button class="acct-btn" style="height:32px;margin-top:10px;font-size:13px"
+        onclick="renderAccountPage()">I've clicked the link — check again</button></div>`;
   } else if (info.isSynthetic) {
     statusBox = `<div class="abox awarn"><strong>No recovery email on file.</strong><br>
       Without one, your password can't be reset if you forget it. Add an address below.</div>`;
