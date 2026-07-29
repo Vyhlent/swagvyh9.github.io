@@ -21,10 +21,11 @@
 <script type="module">
 import { initializeApp }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, getDocs, collection, doc, getDoc, setDoc, deleteDoc }
+import { getFirestore, getDocs, collection, doc, getDoc, setDoc, deleteDoc,
+         connectFirestoreEmulator }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword,
-         sendPasswordResetEmail, onAuthStateChanged, signOut }
+         sendPasswordResetEmail, onAuthStateChanged, signOut, connectAuthEmulator }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
 const app = initializeApp({
@@ -37,6 +38,17 @@ const app = initializeApp({
 });
 const _db   = getFirestore(app);
 const _auth = getAuth(app);
+
+// Local development only: point at the Firebase emulators when served from
+// localhost. This is inert in production (vyhlent.github.io) — the hostname
+// check means the live site always talks to the real project.
+if (['localhost','127.0.0.1'].includes(location.hostname)) {
+  try {
+    connectAuthEmulator(_auth, 'http://127.0.0.1:9099', { disableWarnings: true });
+    connectFirestoreEmulator(_db, '127.0.0.1', 8080);
+    console.info('[garden-planner] Using local Firebase emulators');
+  } catch (e) { console.warn('[garden-planner] Emulator connect failed:', e.message); }
+}
 
 window._fbLoadCrops = async function() {
   const snap = await getDocs(collection(_db, 'crops'));
