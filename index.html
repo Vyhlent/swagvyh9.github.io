@@ -21,11 +21,13 @@
 <script type="module">
 import { initializeApp }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, getDocs, collection, doc, getDoc, setDoc, deleteDoc,
-         connectFirestoreEmulator }
+import { getFirestore, initializeFirestore, getDocs, collection, doc, getDoc,
+         setDoc, updateDoc, deleteDoc, connectFirestoreEmulator }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword,
-         sendPasswordResetEmail, onAuthStateChanged, signOut, connectAuthEmulator }
+         sendPasswordResetEmail, onAuthStateChanged, signOut, connectAuthEmulator,
+         EmailAuthProvider, reauthenticateWithCredential, updateEmail,
+         verifyBeforeUpdateEmail }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
 const app = initializeApp({
@@ -36,7 +38,13 @@ const app = initializeApp({
   messagingSenderId: "293487006691",
   appId:             "1:293487006691:web:3136660dd705d7b10946d6"
 });
-const _db   = getFirestore(app);
+// This app only does one-shot reads/writes (getDocs/getDoc/setDoc/deleteDoc) —
+// there are no realtime listeners. Firestore's default webchannel stream is
+// therefore pure overhead, and it is commonly blocked by ad/tracking blockers
+// (ERR_BLOCKED_BY_CLIENT), after which the SDK retries forever and the browser
+// shows the tab as perpetually loading. Long-polling uses ordinary XHRs that
+// complete, so the page finishes loading.
+const _db   = initializeFirestore(app, { experimentalForceLongPolling: true });
 const _auth = getAuth(app);
 
 // Local development only: point at the Firebase emulators when served from
@@ -115,13 +123,29 @@ window._fbSignIn = async function(username, password) {
   // Resolve username → authEmail (fall back to synthetic for accounts without one).
   const unSnap = await getDoc(doc(_db, 'usernames', uname));
   if (!unSnap.exists()) throw new Error('Username not found');
-  const authEmail = unSnap.data().authEmail || _synthEmail(uname);
-  const cred = await signInWithEmailAndPassword(_auth, authEmail, password);
-  try { localStorage.setItem('gp-uid', cred.user.uid); localStorage.setItem('gp-username', uname); } catch(e) {}
-  window._currentUser = cred.user;
-  window._currentUsername = uname;
-  window.dispatchEvent(new CustomEvent('auth-changed', { detail: window._currentUser }));
-  return cred.user;
+  const rec = unSnap.data();
+  // The stored authEmail can briefly lag the account's real Firebase email while
+  // a recovery-email change awaits verification, so try every address we know of.
+  const candidates = [...new Set(
+    [rec.authEmail, rec.pendingAuthEmail, _synthEmail(uname)].filter(Boolean)
+  )];
+  let lastErr = null;
+  for (const addr of candidates) {
+    try {
+      const cred = await signInWithEmailAndPassword(_auth, addr, password);
+      try { localStorage.setItem('gp-uid', cred.user.uid); localStorage.setItem('gp-username', uname); } catch(e) {}
+      window._currentUser = cred.user;
+      window._currentUsername = uname;
+      window.dispatchEvent(new CustomEvent('auth-changed', { detail: window._currentUser }));
+      return cred.user;
+    } catch (e) {
+      lastErr = e;
+      // Keep trying only while the failure could be caused by the address itself.
+      const code = e.code || e.message || '';
+      if (!/user-not-found|invalid-credential|invalid-email|wrong-password/.test(code)) throw e;
+    }
+  }
+  throw lastErr;
 };
 
 // Send a password-reset email. Only works for accounts with a real recovery
@@ -137,6 +161,69 @@ window._fbResetPassword = async function(username) {
   }
   await sendPasswordResetEmail(_auth, authEmail);
   return authEmail;
+};
+
+// Current account details for the settings page.
+window._fbGetAccountInfo = async function() {
+  const user = _auth.currentUser;
+  if (!user) return null;
+  let prof = null;
+  try {
+    const s = await getDoc(doc(_db, 'users', user.uid));
+    if (s.exists()) prof = s.data();
+  } catch(e) { /* profile is optional here */ }
+  return {
+    uid:              user.uid,
+    username:         window._currentUsername || prof?.username || null,
+    authEmail:        user.email || '',
+    isSynthetic:      (user.email || '').endsWith('@' + _SYNTH_DOMAIN),
+    emailVerified:    !!user.emailVerified,
+    pendingAuthEmail: prof?.pendingAuthEmail || null,
+    createdAt:        prof?.createdAt || null,
+  };
+};
+
+// Add or change the recovery email. Requires the current password, both because
+// Firebase demands a fresh credential to change an email and because it is the
+// confirmation step. Returns {pending} — true when the project requires the new
+// address to be verified before it takes effect.
+window._fbUpdateRecoveryEmail = async function(newEmail, currentPassword) {
+  const user = _auth.currentUser;
+  if (!user)  throw new Error('You are not signed in.');
+  if (!_isRealEmail(newEmail)) throw new Error('Enter a valid email address.');
+  const uname = window._currentUsername;
+  if (!uname) throw new Error('Could not determine your username.');
+  if ((user.email || '').toLowerCase() === newEmail.trim().toLowerCase()) {
+    throw new Error('That is already your recovery email.');
+  }
+
+  // Confirm the password by reauthenticating against the current address.
+  const cred = EmailAuthProvider.credential(user.email, currentPassword);
+  await reauthenticateWithCredential(user, cred);
+
+  const email = newEmail.trim();
+  try {
+    // Preferred path: change it immediately.
+    await updateEmail(user, email);
+    await setDoc(doc(_db, 'users', user.uid),
+      { authEmail: email, hasRecoveryEmail: true, pendingAuthEmail: null }, { merge: true });
+    await setDoc(doc(_db, 'usernames', uname),
+      { authEmail: email, pendingAuthEmail: null }, { merge: true });
+    return { pending: false, email };
+  } catch (e) {
+    const code = e.code || '';
+    // Projects with "verify before change email" enabled reject updateEmail and
+    // require the new address to confirm ownership first.
+    if (code === 'auth/operation-not-allowed' || /verify/i.test(e.message || '')) {
+      await verifyBeforeUpdateEmail(user, email);
+      // Record it as pending only — the auth email has NOT changed yet, so the
+      // stored authEmail must stay as-is or username sign-in would break.
+      await setDoc(doc(_db, 'users', user.uid), { pendingAuthEmail: email }, { merge: true });
+      await setDoc(doc(_db, 'usernames', uname), { pendingAuthEmail: email }, { merge: true });
+      return { pending: true, email };
+    }
+    throw e;
+  }
 };
 
 window._fbSignOut = async function() {
@@ -432,6 +519,17 @@ a{color:inherit;text-decoration:none}
 .auth-toggle a{color:var(--gn);cursor:pointer;text-decoration:underline}
 .auth-err{background:var(--rb);color:var(--rt);border:1px solid var(--rbr);border-radius:8px;padding:9px 13px;font-size:13px;margin-bottom:.9rem;display:none}
 .auth-err.show{display:block}
+
+/* Account settings page */
+.acct-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-bottom:1.25rem}
+.acct-form{max-width:420px}
+.acct-form .frow{margin-bottom:.9rem}
+.acct-form label{display:block;font-size:13px;color:var(--ts);margin-bottom:5px}
+.acct-btn{height:44px;padding:0 22px;border:1px solid var(--gn);border-radius:8px;background:var(--gn);color:#EAF3DE;font-size:15px;font-weight:500;font-family:inherit;cursor:pointer}
+.acct-btn:disabled{opacity:.5;cursor:not-allowed}
+.acct-err{background:var(--rb);color:var(--rt);border:1px solid var(--rbr);border-radius:8px;padding:9px 13px;font-size:13px;margin-bottom:.9rem;display:none}
+.acct-err.show{display:block}
+.acct-badge{display:inline-block;font-size:12px;font-weight:500;padding:3px 10px;border-radius:10px;background:var(--gnb);color:var(--gnt);margin-left:8px}
 /* nav auth area */
 .nav-auth-loggedin{display:flex;align-items:center;gap:8px}
 .nav-username-badge{display:flex;align-items:center;gap:6px;height:42px;padding:0 14px;border:1px solid var(--gn);border-radius:8px;background:var(--gnb);color:var(--gnt);font-size:14px;font-weight:600;cursor:pointer;text-decoration:none;flex-shrink:0}
@@ -594,7 +692,8 @@ a{color:inherit;text-decoration:none}
       </a>
       <!-- Logged-in: username badge + sign out -->
       <div class="nav-auth-loggedin" id="nav-loggedin" style="display:none">
-        <span class="nav-username-badge" id="nav-username-display" style="cursor:default">…</span>
+        <button class="nav-username-badge" id="nav-username-display" onclick="gotoPage('account')"
+          title="Account settings" style="cursor:pointer;border:none;font-family:inherit">…</button>
         <button class="nav-signout-btn" onclick="doNavSignOut()" title="Sign out">
           <i class="fa-solid fa-right-from-bracket"></i>
         </button>
@@ -682,6 +781,12 @@ a{color:inherit;text-decoration:none}
     <div class="page-title">Nutrition comparison</div>
     <div class="page-sub">Nutritional values per 100g fresh weight. Herbs and ornamentals shown separately.</div>
     <div id="nut-content"></div>
+  </div>
+
+  <div id="page-account" class="page">
+    <div class="page-title">Account settings</div>
+    <div class="page-sub">Manage your sign-in details.</div>
+    <div id="account-content"></div>
   </div>
 </div>
 
@@ -859,10 +964,13 @@ function gotoPage(p) {
   document.querySelectorAll('.page').forEach(x => x.classList.remove('on'));
   document.querySelectorAll('.nbtn').forEach(x => x.classList.remove('on'));
   document.getElementById('page-' + p).classList.add('on');
-  document.querySelector(`#nav-tabs .nbtn[onclick="gotoPage('${p}')"]`).classList.add('on');
+  // The account page is reached from the nav badge, not a tab — so there may be
+  // no matching nav button to highlight.
+  document.querySelector(`#nav-tabs .nbtn[onclick="gotoPage('${p}')"]`)?.classList.add('on');
   if (p === 'rotation'   && !rR) { renderRotation();      rR = true; }
   if (p === 'nutrition') { renderNutritionPage(); nR = true; }
   if (p === 'charts')    { renderAllCharts(); renderCompanions(); chR = true; cR = true; }
+  if (p === 'account')   { renderAccountPage(); }
 }
 
 function showChartSection(sec) {
@@ -2114,6 +2222,126 @@ document.getElementById('zone-modal').addEventListener('click', e => {
   if (e.target === document.getElementById('zone-modal')) closeZoneModal();
 });
 
+// ─── Account settings page ────────────────────────────────
+async function renderAccountPage() {
+  const el = document.getElementById('account-content');
+  if (!el) return;
+
+  if (!window._currentUser) {
+    el.innerHTML = `<div class="panel">
+      <div class="abox ainfo">You're not signed in.
+        <button class="acct-btn" style="height:34px;margin-left:10px;font-size:13px"
+          onclick="openAuthModal('signin')">Sign in</button></div>
+    </div>`;
+    return;
+  }
+
+  el.innerHTML = `<div class="panel"><span class="spin"></span> Loading account…</div>`;
+  let info = null;
+  try { info = await window._fbGetAccountInfo(); } catch(e) { /* handled below */ }
+  if (!info) {
+    el.innerHTML = `<div class="panel"><div class="abox awarn">Could not load your account details. Try reloading.</div></div>`;
+    return;
+  }
+
+  const created = info.createdAt
+    ? new Date(info.createdAt).toLocaleDateString(undefined, { year:'numeric', month:'long', day:'numeric' })
+    : '—';
+
+  // Recovery-email status: synthetic address means none was ever provided.
+  let statusBox;
+  if (info.pendingAuthEmail) {
+    statusBox = `<div class="abox ainfo"><strong>Pending verification:</strong> ${esc(info.pendingAuthEmail)}<br>
+      Check that inbox and click the link to finish. Until then your current sign-in address still applies.</div>`;
+  } else if (info.isSynthetic) {
+    statusBox = `<div class="abox awarn"><strong>No recovery email on file.</strong><br>
+      Without one, your password can't be reset if you forget it. Add an address below.</div>`;
+  } else {
+    statusBox = `<div class="abox atip"><strong>Recovery email:</strong> ${esc(info.authEmail)}${
+      info.emailVerified ? ' <span class="acct-badge">Verified</span>' : ''}<br>
+      Password reset links will be sent here.</div>`;
+  }
+
+  el.innerHTML = `
+<div class="panel">
+  <div class="sh" style="margin-top:0">Your account</div>
+  <div class="acct-grid">
+    <div class="icard">
+      <div class="ilabel">Username</div>
+      <div class="ival">${esc(info.username || '—')}${isAdmin() ? '<span class="acct-badge">Admin</span>' : ''}</div>
+    </div>
+    <div class="icard">
+      <div class="ilabel">Member since</div>
+      <div class="ival">${esc(created)}</div>
+    </div>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="sh" style="margin-top:0">${info.isSynthetic && !info.pendingAuthEmail ? 'Add a recovery email' : 'Change recovery email'}</div>
+  ${statusBox}
+  <div class="acct-err" id="acct-err"></div>
+  <div class="acct-form">
+    <div class="frow">
+      <label>${info.isSynthetic ? 'Recovery email' : 'New recovery email'}</label>
+      <input type="email" id="acct-email" placeholder="you@example.com" autocomplete="email">
+    </div>
+    <div class="frow">
+      <label>Confirm your password</label>
+      <input type="password" id="acct-password" placeholder="Your current password" autocomplete="current-password">
+    </div>
+    <button class="acct-btn" id="acct-save-btn" onclick="accountSaveEmail()">
+      ${info.isSynthetic && !info.pendingAuthEmail ? 'Add recovery email' : 'Update recovery email'}
+    </button>
+  </div>
+</div>`;
+
+  // Enter in either field submits.
+  ['acct-email','acct-password'].forEach(id => {
+    document.getElementById(id)?.addEventListener('keydown', e => {
+      if (e.key === 'Enter') accountSaveEmail();
+    });
+  });
+}
+
+async function accountSaveEmail() {
+  const email = document.getElementById('acct-email').value.trim();
+  const pw    = document.getElementById('acct-password').value;
+  const errEl = document.getElementById('acct-err');
+  const btn   = document.getElementById('acct-save-btn');
+  const label = btn.textContent.trim();
+  errEl.classList.remove('show');
+
+  if (!email) { errEl.textContent = 'Enter an email address.'; errEl.classList.add('show'); return; }
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    errEl.textContent = 'That email address looks invalid.'; errEl.classList.add('show'); return;
+  }
+  if (!pw) { errEl.textContent = 'Enter your current password to confirm.'; errEl.classList.add('show'); return; }
+
+  btn.disabled = true; btn.textContent = 'Saving…';
+  try {
+    const res = await window._fbUpdateRecoveryEmail(email, pw);
+    if (res.pending) {
+      toast('ok', `Verification link sent to ${esc(res.email)} — click it to finish.`, 8000);
+    } else {
+      toast('ok', `Recovery email set to ${esc(res.email)}`, 5000);
+    }
+    renderAccountPage();   // refresh to show the new state
+  } catch(e) {
+    const code = e.code || e.message || '';
+    let msg = e.message || 'Could not update your recovery email.';
+    if (/wrong-password|invalid-credential/.test(code))   msg = 'Incorrect password.';
+    else if (/email-already-in-use/.test(code))           msg = 'That email is already used by another account.';
+    else if (/invalid-email/.test(code))                  msg = 'That email address looks invalid.';
+    else if (/requires-recent-login/.test(code))          msg = 'For security, sign out and back in, then try again.';
+    else if (/too-many-requests/.test(code))              msg = 'Too many attempts — try again later.';
+    else if (/network-request-failed/.test(code))          msg = 'Network error — check your connection and try again.';
+    errEl.textContent = msg;
+    errEl.classList.add('show');
+    btn.disabled = false; btn.textContent = label;
+  }
+}
+
 // ─── Auth modal state ─────────────────────────────────────
 let authMode = 'signin'; // 'signin' | 'signup'
 
@@ -2242,7 +2470,7 @@ function navMyGarden(e) {
 // when request.auth.uid is in this same admin list), so editing is enforced
 // server-side too — the gate is not merely cosmetic. Keep ADMIN_UIDS in sync
 // with the crops write rule in firestore.rules.
-const ADMIN_UIDS = ['tSvpCNf7RTUKi8hloRCkjTowsWp1'];
+const ADMIN_UIDS = ['vCLr0tkE26Vabd6juiL78VPevs53'];
 function isAdmin() {
   const uid = window._currentUser && window._currentUser.uid;
   return !!uid && ADMIN_UIDS.includes(uid);
@@ -2254,6 +2482,8 @@ function updateAdminUI() {
   if (Array.isArray(PLANTS) && PLANTS.length) renderGrid();
   const detailShown = document.getElementById('pdetail')?.style.display !== 'none';
   if (currentId && detailShown) showDetail(currentId);
+  // Keep the account page in sync if it's the one on screen (e.g. after sign-out).
+  if (document.getElementById('page-account')?.classList.contains('on')) renderAccountPage();
 }
 
 // ─── Update nav auth widget ────────────────────────────────
