@@ -23,7 +23,8 @@ import { initializeApp }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getFirestore, getDocs, collection, doc, getDoc, setDoc, deleteDoc }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { getAuth, signInAnonymously, onAuthStateChanged, signOut }
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword,
+         sendPasswordResetEmail, onAuthStateChanged, signOut }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
 const app = initializeApp({
@@ -59,67 +60,71 @@ window._fbDeleteCrop = async function(id) {
   await deleteDoc(doc(_db, 'crops', id));
 };
 
-// ── Auth helpers (anonymous auth + Firestore username store) ─────────────────
-// We use anonymous Firebase Auth for the session token/uid, and store a
-// simple password hash in Firestore for sign-in verification.
-// On sign-up:  signInAnonymously → get uid → store {username, pwHash} → done.
-// On sign-in:  look up username → get uid + pwHash → verify password →
-//              restore session by saving uid to localStorage (uid is stable).
-// Sessions persist via localStorage key 'gp-uid'. On page load we check if
-// the current anonymous auth uid matches the stored uid; if not we just keep
-// the anonymous session but mark the user as logged-in by uid lookup.
+// ── Auth helpers (real Firebase email/password auth) ─────────────────────────
+// Accounts log in with username + password. Firebase Auth is email-based, so
+// each account maps to an "auth email": the user's real email if they gave one
+// at sign-up (which enables native password reset), otherwise a synthetic
+// address built from the username. Login resolves username → authEmail via the
+// public `usernames` doc, then signs in. request.auth.uid is now the canonical
+// Firebase uid — stable across devices and used directly by the security rules.
 
 window._auth = _auth;
 window._db   = _db;
 
-// Simple non-cryptographic hash — good enough for a garden planner.
-// For real security use bcrypt server-side; this is client-only.
-async function _hashPassword(password) {
-  const enc = new TextEncoder().encode(password);
-  const buf = await crypto.subtle.digest('SHA-256', enc);
-  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
-}
+const _SYNTH_DOMAIN = 'gardenplanner.app';
+const _synthEmail = uname => `${uname}@${_SYNTH_DOMAIN}`;
+const _isRealEmail = e => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e || '');
 
-window._fbSignUp = async function(username, password) {
+window._fbSignUp = async function(username, password, email) {
   const uname = username.toLowerCase();
-  // Check username not taken
+  // Reject taken usernames up front (the security rule enforces this too).
   const unSnap = await getDoc(doc(_db, 'usernames', uname));
   if (unSnap.exists()) throw new Error('Username already taken');
-  // Sign in anonymously to get a stable uid
-  const cred = await signInAnonymously(_auth);
+  const hasEmail  = _isRealEmail(email);
+  const authEmail = hasEmail ? email.trim() : _synthEmail(uname);
+  // Create the real Firebase Auth account (uid is canonical from here on).
+  const cred = await createUserWithEmailAndPassword(_auth, authEmail, password);
   const uid  = cred.user.uid;
-  const pwHash = await _hashPassword(password);
-  // Store user profile and username index
+  // Profile doc + public username→uid/email index (authEmail powers username login).
   await setDoc(doc(_db, 'users', uid), {
-    uid, username: uname, pwHash, createdAt: new Date().toISOString()
+    uid, username: uname, authEmail, hasRecoveryEmail: hasEmail,
+    createdAt: new Date().toISOString(),
   });
-  await setDoc(doc(_db, 'usernames', uname), { uid });
-  // Persist session
+  await setDoc(doc(_db, 'usernames', uname), { uid, authEmail });
   try { localStorage.setItem('gp-uid', uid); localStorage.setItem('gp-username', uname); } catch(e) {}
   window._currentUser = cred.user;
   window._currentUsername = uname;
+  window.dispatchEvent(new CustomEvent('auth-changed', { detail: window._currentUser }));
   return cred.user;
 };
 
 window._fbSignIn = async function(username, password) {
   const uname = username.toLowerCase();
-  // Resolve username → uid
+  // Resolve username → authEmail (fall back to synthetic for accounts without one).
   const unSnap = await getDoc(doc(_db, 'usernames', uname));
   if (!unSnap.exists()) throw new Error('Username not found');
-  const uid = unSnap.data().uid;
-  // Fetch user doc to verify password
-  const userSnap = await getDoc(doc(_db, 'users', uid));
-  if (!userSnap.exists()) throw new Error('Account not found');
-  const userData = userSnap.data();
-  const pwHash = await _hashPassword(password);
-  if (pwHash !== userData.pwHash) throw new Error('Incorrect password');
-  // Sign in anonymously (new session token, but we track identity by uid in localStorage)
-  await signInAnonymously(_auth);
-  // Persist the real uid so we know who this is
-  try { localStorage.setItem('gp-uid', uid); localStorage.setItem('gp-username', uname); } catch(e) {}
-  window._currentUser = { uid };
+  const authEmail = unSnap.data().authEmail || _synthEmail(uname);
+  const cred = await signInWithEmailAndPassword(_auth, authEmail, password);
+  try { localStorage.setItem('gp-uid', cred.user.uid); localStorage.setItem('gp-username', uname); } catch(e) {}
+  window._currentUser = cred.user;
   window._currentUsername = uname;
-  return window._currentUser;
+  window.dispatchEvent(new CustomEvent('auth-changed', { detail: window._currentUser }));
+  return cred.user;
+};
+
+// Send a password-reset email. Only works for accounts with a real recovery
+// email — synthetic-email accounts have no inbox to send to.
+window._fbResetPassword = async function(username) {
+  const uname = (username || '').toLowerCase();
+  if (!uname) throw new Error('Enter your username first');
+  const unSnap = await getDoc(doc(_db, 'usernames', uname));
+  if (!unSnap.exists()) throw new Error('Username not found');
+  const authEmail = unSnap.data().authEmail || _synthEmail(uname);
+  if (authEmail.endsWith('@' + _SYNTH_DOMAIN)) {
+    throw new Error('No recovery email is on file for this account.');
+  }
+  await sendPasswordResetEmail(_auth, authEmail);
+  return authEmail;
 };
 
 window._fbSignOut = async function() {
@@ -138,30 +143,29 @@ window._fbGetCurrentUsername = async function(uid) {
   return snap.exists() ? snap.data().username : null;
 };
 
-// Restore session from localStorage on load
+// Firebase persists the session across reloads; onAuthStateChanged is the
+// single source of truth for identity (localStorage is only a username cache).
 window._currentUser = null;
 window._currentUsername = null;
-try {
-  const storedUid = localStorage.getItem('gp-uid');
-  const storedUN  = localStorage.getItem('gp-username');
-  if (storedUid) {
-    window._currentUser    = { uid: storedUid };
-    window._currentUsername = storedUN || null;
-  }
-} catch(e) {}
-
 window._authReady = new Promise(resolve => {
-  // Resolve immediately using localStorage session (anonymous auth state
-  // still fires but we don't rely on it for identity — uid from localStorage is canonical)
-  resolve(window._currentUser);
-  // Still watch anonymous auth state for signOut detection
-  onAuthStateChanged(_auth, user => {
-    if (!user) {
-      // Signed out — clear session
-      window._currentUser    = null;
+  let resolved = false;
+  onAuthStateChanged(_auth, async user => {
+    if (user) {
+      window._currentUser = user;
+      // Recover the username: cached first, else from the profile doc.
+      let uname = window._currentUsername;
+      if (!uname) { try { uname = await _fbGetCurrentUsername(user.uid); } catch(e) {} }
+      window._currentUsername = uname || null;
+      try {
+        localStorage.setItem('gp-uid', user.uid);
+        if (uname) localStorage.setItem('gp-username', uname);
+      } catch(e) {}
+    } else {
+      window._currentUser = null;
       window._currentUsername = null;
       try { localStorage.removeItem('gp-uid'); localStorage.removeItem('gp-username'); } catch(e) {}
     }
+    if (!resolved) { resolved = true; resolve(window._currentUser); }
     window.dispatchEvent(new CustomEvent('auth-changed', { detail: window._currentUser }));
   });
 });
@@ -478,10 +482,18 @@ a{color:inherit;text-decoration:none}
     </div>
     <div class="auth-field">
       <label>Password</label>
-      <input type="password" id="auth-password" placeholder="Any password works" autocomplete="current-password" minlength="1">
-      <div class="hint" id="auth-pw-hint" style="display:none">You'll need this to sign in on other devices</div>
+      <input type="password" id="auth-password" placeholder="At least 6 characters" autocomplete="current-password" minlength="6">
+      <div class="hint" id="auth-pw-hint" style="display:none">At least 6 characters — you'll need it to sign in on other devices</div>
+    </div>
+    <div class="auth-field" id="auth-email-field" style="display:none">
+      <label>Recovery email <span style="color:var(--tt);font-weight:400">(optional)</span></label>
+      <input type="email" id="auth-email" placeholder="you@example.com" autocomplete="email">
+      <div class="hint" id="auth-email-hint">Add one to enable password reset. Leave blank to skip.</div>
     </div>
     <button class="auth-submit" id="auth-submit" onclick="authSubmit()">Sign in</button>
+    <div class="auth-forgot" id="auth-forgot" style="text-align:center;font-size:13px;margin-top:.7rem">
+      <a onclick="authForgot()" style="color:var(--gn);cursor:pointer;text-decoration:underline">Forgot password?</a>
+    </div>
     <div class="auth-toggle">
       <span id="auth-toggle-text">No account? </span>
       <a onclick="authToggleMode()">Create one</a>
@@ -2116,42 +2128,72 @@ function updateAuthModal() {
   document.querySelector('#auth-modal .auth-toggle a').textContent = isSignup ? 'Sign in' : 'Create one';
   document.getElementById('auth-username-hint').style.display = isSignup ? '' : 'none';
   document.getElementById('auth-pw-hint').style.display = isSignup ? '' : 'none';
+  document.getElementById('auth-email-field').style.display = isSignup ? '' : 'none';
+  document.getElementById('auth-forgot').style.display = isSignup ? 'none' : '';
   document.getElementById('auth-password').autocomplete = isSignup ? 'new-password' : 'current-password';
   document.getElementById('auth-err').classList.remove('show');
 }
 async function authSubmit() {
   const username = document.getElementById('auth-username').value.trim().toLowerCase();
   const password = document.getElementById('auth-password').value;
+  const email    = document.getElementById('auth-email').value.trim();
   const errEl    = document.getElementById('auth-err');
   const btn      = document.getElementById('auth-submit');
   errEl.classList.remove('show');
 
   if (!username) { errEl.textContent='Enter a username'; errEl.classList.add('show'); return; }
   if (!password) { errEl.textContent='Enter a password'; errEl.classList.add('show'); return; }
-  if (authMode === 'signup' && !/^[a-z0-9_]+$/.test(username)) {
-    errEl.textContent='Username can only contain letters, numbers, underscores'; errEl.classList.add('show'); return;
+  if (authMode === 'signup') {
+    if (!/^[a-z0-9_]+$/.test(username)) {
+      errEl.textContent='Username can only contain letters, numbers, underscores'; errEl.classList.add('show'); return;
+    }
+    if (password.length < 6) {
+      errEl.textContent='Password must be at least 6 characters'; errEl.classList.add('show'); return;
+    }
+    if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      errEl.textContent='That email address looks invalid'; errEl.classList.add('show'); return;
+    }
   }
 
   btn.disabled = true;
   btn.textContent = authMode === 'signup' ? 'Creating…' : 'Signing in…';
   try {
     if (authMode === 'signup') {
-      await window._fbSignUp(username, password);
+      await window._fbSignUp(username, password, email);
     } else {
       await window._fbSignIn(username, password);
     }
     closeAuthModal();
-    // auth-changed event will update the UI
+    // auth-changed event updates the nav UI
   } catch(e) {
-    let msg = e.message;
-    if (msg.includes('email-already-in-use')) msg = 'Username already taken';
-    if (msg.includes('wrong-password') || msg.includes('invalid-credential')) msg = 'Incorrect password';
-    if (msg.includes('invalid-email')) msg = 'Invalid email address';
+    let msg = e.message || 'Something went wrong';
+    if (msg.includes('email-already-in-use'))        msg = 'That username or email is already registered';
+    else if (msg.includes('weak-password'))          msg = 'Password must be at least 6 characters';
+    else if (msg.includes('wrong-password') || msg.includes('invalid-credential') || msg.includes('user-not-found'))
+                                                     msg = 'Incorrect username or password';
+    else if (msg.includes('invalid-email'))          msg = 'Invalid email address';
+    else if (msg.includes('too-many-requests'))      msg = 'Too many attempts — try again later';
     errEl.textContent = msg;
     errEl.classList.add('show');
   } finally {
     btn.disabled = false;
     btn.textContent = authMode === 'signup' ? 'Create account' : 'Sign in';
+  }
+}
+
+// Forgot password — sends a reset email if the account has a real one on file.
+async function authForgot() {
+  const username = document.getElementById('auth-username').value.trim().toLowerCase();
+  const errEl = document.getElementById('auth-err');
+  errEl.classList.remove('show');
+  if (!username) { errEl.textContent = 'Enter your username above first.'; errEl.classList.add('show'); return; }
+  try {
+    const email = await window._fbResetPassword(username);
+    closeAuthModal();
+    toast('ok', `Password reset link sent to ${email}`, 6000);
+  } catch(e) {
+    errEl.textContent = e.message;
+    errEl.classList.add('show');
   }
 }
 
