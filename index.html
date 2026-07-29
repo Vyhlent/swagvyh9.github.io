@@ -21,7 +21,7 @@
 <script type="module">
 import { initializeApp }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, getDocs, collection, doc, getDoc, setDoc }
+import { getFirestore, getDocs, collection, doc, getDoc, setDoc, deleteDoc }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import { getAuth, signInAnonymously, onAuthStateChanged, signOut }
   from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
@@ -47,6 +47,16 @@ window._fbLoadCrops = async function() {
     plants.push({ data, sha: null, filename: d.id + '.js', path: null });
   });
   return plants;
+};
+
+// Write a single crop document (create or overwrite) at crops/{id}.
+window._fbSaveCrop = async function(id, data) {
+  await setDoc(doc(_db, 'crops', id), data);
+};
+
+// Permanently delete a crop document at crops/{id}.
+window._fbDeleteCrop = async function(id) {
+  await deleteDoc(doc(_db, 'crops', id));
 };
 
 // ── Auth helpers (anonymous auth + Firestore username store) ─────────────────
@@ -573,7 +583,7 @@ a{color:inherit;text-decoration:none}
     <div id="plist">
       <div class="topbar">
         <input type="text" id="search" placeholder="Search plants…" oninput="renderGrid()">
-        <button class="greenbtn" onclick="openAdd()">+ Add crop</button>
+        <button class="greenbtn" id="add-crop-btn" onclick="openAdd()" style="display:none">+ Add crop</button>
       </div>
       <div class="cat-row" id="cat-row"></div>
       <div class="sel-bar" id="sel-bar">
@@ -583,7 +593,7 @@ a{color:inherit;text-decoration:none}
       </div>
       <div class="pgrid" id="pgrid">
         <div style="padding:3rem;text-align:center;color:var(--ts)">
-          <span class="spin"></span> Loading crops from GitHub…
+          <span class="spin"></span> Loading crops…
         </div>
       </div>
     </div>
@@ -878,8 +888,8 @@ function renderGrid() {
       </div>
       <div class="pcard-actions">
         <button onclick="showDetail('${esc(p.data.id)}')">View</button>
-        <button onclick="openEdit('${esc(p.data.id)}')">Edit</button>
-        <button class="del-btn" onclick="deletePlant('${esc(p.data.id)}')">Delete</button>
+        ${isAdmin() ? `<button onclick="openEdit('${esc(p.data.id)}')">Edit</button>
+        <button class="del-btn" onclick="deletePlant('${esc(p.data.id)}')">Delete</button>` : ''}
       </div>
     </div>`;
   }).join('');
@@ -1057,8 +1067,8 @@ function buildDetail(d) {
   <div class="ph-icon">${esc(d.emoji)}</div>
   <div>
     <div class="ph-title">${esc(d.name)}</div>
-    <div class="ph-sub">${esc(d.cat)} · Zone ${activeZone} ·
-      <button style="background:none;border:none;color:var(--gn);cursor:pointer;font-size:14px;padding:0" onclick="openEdit('${esc(d.id)}')">Edit</button>
+    <div class="ph-sub">${esc(d.cat)} · Zone ${activeZone}${isAdmin() ? ` ·
+      <button style="background:none;border:none;color:var(--gn);cursor:pointer;font-size:14px;padding:0" onclick="openEdit('${esc(d.id)}')">Edit</button>` : ''}
     </div>
   </div>
 </div>
@@ -1112,24 +1122,34 @@ function buildDetail(d) {
 </div>`;
 }
 
-// ─── Delete — requires token ───────────────────────────────
-function deletePlant(id) {
+// ─── Delete — permanently removes the crop from Firestore ──
+async function deletePlant(id) {
+  if (!isAdmin()) { toast('err','You must be signed in to delete crops.'); return; }
   const p = PLANTS.find(x => x.data.id === id); if (!p) return;
-  if (!confirm(`Delete "${p.data.name}"? This removes it from the current session.`)) return;
+  if (!confirm(`Delete "${p.data.name}"? This permanently removes it from the shared crop database.`)) return;
+  try {
+    if (!window._fbDeleteCrop) throw new Error('Firestore is not ready yet.');
+    await window._fbDeleteCrop(id);
+  } catch(e) {
+    toast('err','Delete failed: '+e.message, 8000);
+    return;
+  }
   PLANTS = PLANTS.filter(x => x.data.id !== id);
   cR=false; rR=false; nR=false; chR=false;
   renderCatRow(); renderGrid();
   if (currentId === id) { currentId = null; showList(); }
-  toast('ok', `Deleted ${p.data.name} (session only)`);
+  toast('ok', `Deleted ${p.data.name}`);
 }
 
 // ─── Edit / Add modal ─────────────────────────────────────
 function openEdit(id) {
+  if (!isAdmin()) { toast('err','You must be signed in to edit crops.'); return; }
   const p = PLANTS.find(x => x.data.id === id); if (!p) return;
   editingPlant = { ...p, data: JSON.parse(JSON.stringify(p.data)) };
   isNew = false; renderEditModal();
 }
 function openAdd() {
+  if (!isAdmin()) { toast('err','You must be signed in to add crops.'); return; }
   editingPlant = {
     data:{id:'',name:'',cat:'',emoji:'🌱',
       planting:{zone6:'',depth:'',spacing:'',ph:'6.0–7.0',sun:'Full sun'},
@@ -1285,11 +1305,22 @@ function cancelEdit() {
   editingPlant = null;
 }
 
-// saveEdit: validate form then save
-function saveEdit() {
+// saveEdit: validate the form, collect companions, then persist to Firestore
+async function saveEdit() {
+  if (!isAdmin()) { toast('err','You must be signed in to edit crops.'); return; }
   const d = editingPlant.data;
   if (!d.name.trim()) { alert('Please enter a crop name.'); return; }
-  if (!d.id.trim())   { alert('Please enter an ID / filename slug.'); return; }
+  const id = (d.id || '').trim().toLowerCase();
+  if (!id) { alert('Please enter an ID / filename slug.'); return; }
+  if (!/^[a-z0-9-]+$/.test(id)) {
+    alert('ID may only contain lowercase letters, numbers, and hyphens (used as the database key).');
+    return;
+  }
+  d.id = id;
+  if (isNew && PLANTS.some(x => x.data.id === id)) {
+    alert(`A crop with ID "${id}" already exists. Choose a different ID.`);
+    return;
+  }
 
   // Collect companion data from the live text inputs
   const gn = document.getElementById('fgn')?.value || '';
@@ -1301,6 +1332,7 @@ function saveEdit() {
     bad:  bn.split(',').map((nm,i)=>({name:nm.trim(),why:bw[i]?.trim()||''})).filter(x=>x.name),
   };
 
+  await _doSave();
 }
 
 async function _doSave() {
@@ -1308,15 +1340,14 @@ async function _doSave() {
   const btn = document.getElementById('save-btn');
   if (btn) { btn.disabled=true; btn.textContent='Saving...'; }
   try {
+    // Persist the crop document to Firestore (crops/{id}) — the real save.
+    if (!window._fbSaveCrop) throw new Error('Firestore is not ready yet.');
+    await window._fbSaveCrop(d.id, d);
+
     if (isNew) {
       editingPlant.filename = d.id + '.js';
       editingPlant.path     = null;
       editingPlant.sha      = null;
-    }
-
-
-
-    if (isNew) {
       PLANTS.push(JSON.parse(JSON.stringify(editingPlant)));
       PLANTS.sort((a,b)=>a.data.name.localeCompare(b.data.name));
     } else {
@@ -2151,6 +2182,26 @@ function navMyGarden(e) {
   }
 }
 
+// ─── Admin gating ──────────────────────────────────────────
+// This CLIENT-SIDE gate hides the add/edit/delete controls from non-admins.
+// It is backed by a matching Firestore security rule (crops write allowed only
+// when request.auth.uid is in this same admin list), so editing is enforced
+// server-side too — the gate is not merely cosmetic. Keep ADMIN_UIDS in sync
+// with the crops write rule in firestore.rules.
+const ADMIN_UIDS = ['tSvpCNf7RTUKi8hloRCkjTowsWp1'];
+function isAdmin() {
+  const uid = window._currentUser && window._currentUser.uid;
+  return !!uid && ADMIN_UIDS.includes(uid);
+}
+function updateAdminUI() {
+  const addBtn = document.getElementById('add-crop-btn');
+  if (addBtn) addBtn.style.display = isAdmin() ? '' : 'none';
+  // Re-render so the per-crop Edit/Delete controls reflect the current role.
+  if (Array.isArray(PLANTS) && PLANTS.length) renderGrid();
+  const detailShown = document.getElementById('pdetail')?.style.display !== 'none';
+  if (currentId && detailShown) showDetail(currentId);
+}
+
 // ─── Update nav auth widget ────────────────────────────────
 async function updateNavAuth(user) {
   const signinBtn   = document.getElementById('nav-signin-btn');
@@ -2158,6 +2209,7 @@ async function updateNavAuth(user) {
   if (!user) {
     signinBtn.style.display = '';     // show Sign in
     loggedin.style.display  = 'none'; // hide username/signout
+    updateAdminUI();
     return;
   }
   signinBtn.style.display = 'none';  // hide Sign in (already logged in)
@@ -2170,6 +2222,7 @@ async function updateNavAuth(user) {
       document.getElementById('nav-username-display').textContent = username;
     }
   } catch(e) { /* silent */ }
+  updateAdminUI();
 }
 
 // Listen for auth changes
@@ -2189,6 +2242,7 @@ window.addEventListener('auth-changed', e => updateNavAuth(e.detail));
     renderCatRow();
     renderGrid();
     updateSelCount();
+    updateAdminUI();
     toast('ok', `✓ Loaded ${PLANTS.length} crops`);
   } catch(e) {
     document.getElementById('pgrid').innerHTML=
