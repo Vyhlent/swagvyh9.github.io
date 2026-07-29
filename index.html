@@ -39,11 +39,11 @@ const app = initializeApp({
   appId:             "1:293487006691:web:3136660dd705d7b10946d6"
 });
 // This app only does one-shot reads/writes (getDocs/getDoc/setDoc/deleteDoc) —
-// there are no realtime listeners. Firestore's default webchannel stream is
-// therefore pure overhead, and it is commonly blocked by ad/tracking blockers
-// (ERR_BLOCKED_BY_CLIENT), after which the SDK retries forever and the browser
-// shows the tab as perpetually loading. Long-polling uses ordinary XHRs that
-// complete, so the page finishes loading.
+// there are no realtime listeners, so Firestore's default webchannel stream buys
+// nothing here and is routinely blocked by ad/tracking blockers
+// (ERR_BLOCKED_BY_CLIENT in the console). Long-polling uses ordinary XHRs that
+// complete instead. NOTE: this is not what caused the "page always loading"
+// symptom — that was an eagerly-loaded remote map image; see loadZoneMap().
 const _db   = initializeFirestore(app, { experimentalForceLongPolling: true });
 const _auth = getAuth(app);
 
@@ -621,10 +621,16 @@ a{color:inherit;text-decoration:none}
     </button>
     <div class="zone-result" id="zone-result"></div>
     <div class="zone-map-wrap">
-      <img src="https://planthardiness.ars.usda.gov/images/maps/phzm_us_map_full.jpg"
-           onerror="this.src='https://upload.wikimedia.org/wikipedia/commons/thumb/a/a7/2023_USDA_Plant_Hardiness_Zone_Map.png/1280px-2023_USDA_Plant_Hardiness_Zone_Map.png'"
-           alt="USDA Plant Hardiness Zone Map" style="width:100%;display:block">
-      <div class="zone-map-caption">2023 USDA Plant Hardiness Zone Map · zones 3–9 are supported in this planner</div>
+      <!-- No src= on purpose. The window load event waits for images, and these
+           remote maps can hang (the USDA host often fails, and the Wikimedia
+           fallback then stalls), which left the browser showing the page as
+           perpetually loading. The map is only needed once this modal is open,
+           so loadZoneMap() sets the src on first open instead. -->
+      <img id="zone-map-img" data-src="https://planthardiness.ars.usda.gov/images/maps/phzm_us_map_full.jpg"
+           data-fallback="https://upload.wikimedia.org/wikipedia/commons/thumb/a/a7/2023_USDA_Plant_Hardiness_Zone_Map.png/1280px-2023_USDA_Plant_Hardiness_Zone_Map.png"
+           alt="USDA Plant Hardiness Zone Map" loading="lazy" decoding="async"
+           style="width:100%;display:block;min-height:60px">
+      <div class="zone-map-caption" id="zone-map-caption">2023 USDA Plant Hardiness Zone Map · zones 3–9 are supported in this planner</div>
     </div>
     <div style="font-size:13px;color:var(--ts);margin-bottom:.75rem">Or select your zone manually:</div>
     <div class="zone-manual-row">
@@ -2133,9 +2139,31 @@ function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').
 document.getElementById('edit-modal').addEventListener('click',e=>{if(e.target===document.getElementById('edit-modal'))cancelEdit();});
 
 // ─── Zone finder ──────────────────────────────────────────
+// Load the zone map on first open. Deliberately not loaded with the page: the
+// window load event waits on images, and these remote hosts can stall, which
+// makes the browser report the page as still loading indefinitely.
+function loadZoneMap() {
+  const img = document.getElementById('zone-map-img');
+  if (!img || img.dataset.started) return;
+  img.dataset.started = '1';
+  img.onerror = () => {
+    // USDA host failed — try the Wikimedia copy once, then give up quietly.
+    if (img.dataset.triedFallback) {
+      img.onerror = null;
+      img.remove();
+      const cap = document.getElementById('zone-map-caption');
+      if (cap) cap.textContent = 'Zone map unavailable offline — select your zone below.';
+      return;
+    }
+    img.dataset.triedFallback = '1';
+    img.src = img.dataset.fallback;
+  };
+  img.src = img.dataset.src;
+}
 function openZoneModal() {
   const modal = document.getElementById('zone-modal');
   modal.classList.remove('hidden');
+  loadZoneMap();
   // Sync modal select to current zone
   const sel = document.getElementById('zone-modal-select');
   if (sel) sel.value = String(activeZone);
