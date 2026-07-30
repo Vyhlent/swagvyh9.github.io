@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zone Window Backfill</title>
+<script type="module">
+import { initializeApp }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { initializeFirestore, getDocs, collection, doc, getDoc, setDoc,
+         connectFirestoreEmulator }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getAuth, onAuthStateChanged, connectAuthEmulator }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+const app = initializeApp({
+  apiKey:            "AIzaSyABvIAAPYNs1WJvsCZmV0kTf7Spx-EV_Zk",
+  authDomain:        "garden-planner-ddbce.firebaseapp.com",
+  projectId:         "garden-planner-ddbce",
+  storageBucket:     "garden-planner-ddbce.firebasestorage.app",
+  messagingSenderId: "293487006691",
+  appId:             "1:293487006691:web:3136660dd705d7b10946d6"
+});
+const db   = initializeFirestore(app, { experimentalForceLongPolling: true });
+const auth = getAuth(app);
+if (['localhost','127.0.0.1'].includes(location.hostname)) {
+  try {
+    connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
+    connectFirestoreEmulator(db, '127.0.0.1', 8080);
+  } catch(e) {}
+}
+
+window._loadCrops = async () => {
+  const snap = await getDocs(collection(db, 'crops'));
+  const out = [];
+  snap.forEach(d => out.push({ id: d.id, data: d.data() }));
+  return out;
+};
+// Merge zone data into a crop without disturbing its other fields.
+window._saveZones = async (id, zones) => {
+  const ref  = doc(db, 'crops', id);
+  const snap = await getDoc(ref);
+  const existing = snap.exists() ? (snap.data().zones || {}) : {};
+  await setDoc(ref, { zones: { ...existing, ...zones } }, { merge: true });
+};
+window._currentUser = null;
+window._authReady = new Promise(res => {
+  let done = false;
+  onAuthStateChanged(auth, u => {
+    window._currentUser = u || null;
+    if (!done) { done = true; res(u || null); }
+  });
+});
+window.dispatchEvent(new Event('fb-ready'));
+</script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --p:#fff;--s:#f5f4f0;--t:#eceae3;
+  --tp:#1a1a18;--ts:#5f5e5a;--tt:#888780;
+  --b1:rgba(0,0,0,0.12);--b2:rgba(0,0,0,0.25);
+  --gn:#3B6D11;--gnb:#EAF3DE;--gnt:#27500A;
+  --ab:#FAEEDA;--at:#633806;--abr:#BA7517;
+  --rb:#FCEBEB;--rt:#791F1F;--rbr:#E24B4A;
+  --lb:#E6F1FB;--lt:#0C447C;--lbr:#378ADD;
+}
+@media(prefers-color-scheme:dark){
+  :root{
+    --p:#1e1e1b;--s:#272724;--t:#141412;
+    --tp:#e8e6df;--ts:#b4b2a9;--tt:#686763;
+    --b1:rgba(255,255,255,0.1);--b2:rgba(255,255,255,0.18);
+    --gn:#7abd3e;--gnb:#1a2e08;--gnt:#c0dd97;
+    --ab:#2a1d06;--at:#FAC775;--abr:#854F0B;
+    --rb:#250909;--rt:#F09595;--rbr:#A32D2D;
+    --lb:#06192e;--lt:#85B7EB;--lbr:#185FA5;
+  }
+}
+body{font-family:system-ui,-apple-system,sans-serif;background:var(--t);color:var(--tp);font-size:15px;padding:1.25rem}
+.wrap{max-width:1500px;margin:0 auto}
+h1{font-size:21px;font-weight:600;margin-bottom:.3rem}
+.sub{font-size:13.5px;color:var(--ts);line-height:1.6;margin-bottom:1.1rem;max-width:980px}
+.panel{background:var(--p);border:1px solid var(--b1);border-radius:11px;padding:1rem 1.1rem;margin-bottom:1rem}
+.box{padding:10px 13px;border-radius:8px;font-size:13px;line-height:1.55;border:1px solid;margin-bottom:.8rem}
+.warn{background:var(--ab);border-color:var(--abr);color:var(--at)}
+.info{background:var(--lb);border-color:var(--lbr);color:var(--lt)}
+.okb{background:var(--gnb);border-color:var(--gn);color:var(--gnt)}
+.err{background:var(--rb);border-color:var(--rbr);color:var(--rt)}
+button{font-family:inherit;cursor:pointer;border-radius:7px;border:1px solid var(--b2);background:var(--p);color:var(--ts);padding:8px 14px;font-size:13.5px}
+button:hover{background:var(--s)}
+button.primary{background:var(--gn);border-color:var(--gn);color:#EAF3DE;font-weight:600}
+button:disabled{opacity:.5;cursor:not-allowed}
+.controls{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:.9rem}
+.stat{display:inline-flex;gap:6px;align-items:center;font-size:12.5px;color:var(--ts);padding:4px 10px;background:var(--s);border-radius:7px}
+table{width:100%;border-collapse:collapse;font-size:12.5px}
+th,td{text-align:left;padding:6px 7px;border-bottom:1px solid var(--b1);vertical-align:top}
+th{font-size:11px;text-transform:uppercase;letter-spacing:.05em;color:var(--tt);position:sticky;top:0;background:var(--p);z-index:2}
+tr.lowconf{background:color-mix(in srgb,var(--ab) 35%,transparent)}
+tr.noparse{background:color-mix(in srgb,var(--rb) 30%,transparent)}
+tr.excluded{opacity:.4}
+input[type=number]{width:52px;padding:4px 5px;font-size:12.5px;font-family:inherit;background:var(--p);color:var(--tp);border:1px solid var(--b2);border-radius:5px;text-align:center}
+input[type=number]:focus{outline:none;border-color:var(--gn)}
+.prose{color:var(--ts);max-width:330px;line-height:1.45}
+.badge{font-size:10.5px;padding:2px 7px;border-radius:8px;white-space:nowrap;font-weight:600}
+.b-high{background:var(--gnb);color:var(--gnt)}
+.b-low{background:var(--ab);color:var(--at)}
+.b-none{background:var(--rb);color:var(--rt)}
+.crop{font-weight:600;color:var(--tp);white-space:nowrap}
+.scroller{max-height:66vh;overflow:auto;border:1px solid var(--b1);border-radius:9px;background:var(--p)}
+.mono{font-variant-numeric:tabular-nums}
+#log{font-size:12px;color:var(--ts);max-height:180px;overflow:auto;line-height:1.6;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Zone window backfill</h1>
+  <p class="sub">
+    Only zone 6 has structured planting/harvest month windows, so the grid overlays and
+    recommendations work in zone 6 only. Every crop <em>does</em> have prose timing text for
+    zones 3–5 and 7–9; this tool parses that text into month numbers so you can review and
+    correct it before anything is written.
+    <strong>Nothing is saved until you press Write.</strong>
+  </p>
+
+  <div class="box warn">
+    <strong>These are proposals, not facts.</strong> Planting months come from your own prose.
+    Harvest months are <em>derived</em>: the zone 6 harvest window shifted by the same number of
+    months as the planting difference. That is a reasonable rule of thumb, not a horticultural
+    source — please sanity-check rows before writing, especially amber and red ones.
+  </div>
+
+  <div id="auth-box"></div>
+
+  <div class="panel">
+    <div class="controls" id="controls" style="display:none">
+      <span class="stat" id="s-total"></span>
+      <span class="stat" id="s-high"></span>
+      <span class="stat" id="s-low"></span>
+      <span class="stat" id="s-none"></span>
+      <span style="flex:1"></span>
+      <button onclick="setFilter('all')" id="f-all">All</button>
+      <button onclick="setFilter('needs')" id="f-needs">Needs attention</button>
+      <button onclick="setFilter('high')" id="f-high">High confidence</button>
+      <button onclick="toggleAll(true)">Include all</button>
+      <button onclick="toggleAll(false)">Exclude all</button>
+      <button class="primary" id="write-btn" onclick="writeAll()">Write included rows to Firestore</button>
+    </div>
+    <div id="status"></div>
+    <div class="scroller" id="table-host"><div style="padding:2rem;color:var(--ts)">Loading crops…</div></div>
+  </div>
+
+  <div class="panel">
+    <div style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--tt);margin-bottom:6px">Log</div>
+    <div id="log">Ready.</div>
+  </div>
+</div>
+
+<script>
+'use strict';
+const ADMIN_UIDS = ['vCLr0tkE26Vabd6juiL78VPevs53'];
+const ZONES = [3,4,5,7,8,9];
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+const MONTHS = { jan:1,feb:2,mar:3,apr:4,may:5,jun:6,jul:7,aug:8,sep:9,oct:10,nov:11,dec:12 };
+
+let CROPS = [];
+let ROWS  = [];
+let filter = 'needs';
+
+const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+const log = m => { const el = document.getElementById('log'); el.textContent = m + '\n' + el.textContent; };
+
+function monthsIn(str) {
+  const out = []; const re = /\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\b/gi;
+  let m; while ((m = re.exec(str)) !== null) out.push(MONTHS[m[1].toLowerCase()]);
+  return out;
+}
+
+/** Extract the outdoor planting window from prose.
+ *  Prefers a transplant clause, then direct-sow, then a generic plant clause.
+ *  "Start indoors" months are skipped — they are not outdoor planting dates. */
+function parsePlanting(prose) {
+  if (!prose || !prose.trim()) return null;
+  const clauses = prose.split(/[;.]|\bthen\b/i).map(s => s.trim()).filter(Boolean);
+  const pick = (re, basis) => {
+    for (const c of clauses) {
+      if (!re.test(c)) continue;
+      if (/indoors/i.test(c)) continue;
+      const ms = monthsIn(c);
+      if (ms.length) return { months: ms, basis };
+    }
+    return null;
+  };
+  const hit = pick(/transplant|set out|plant out/i, 'transplant')
+           || pick(/direct[- ]?sow|direct[- ]?seed|\bsow\b/i, 'sow')
+           || pick(/\bplant\b/i, 'plant');
+  let months, basis, confidence;
+  if (hit) { months = hit.months; basis = hit.basis; confidence = 'high'; }
+  else {
+    const all = monthsIn(prose);
+    if (!all.length) return null;
+    months = all; basis = /indoors/i.test(prose) ? 'indoors-only' : 'any-month'; confidence = 'low';
+  }
+  if (months.length > 2 && confidence === 'high') confidence = 'low';
+  return { start: months[0], end: months[months.length - 1], basis, confidence };
+}
+
+const wrap12 = m => ((m - 1) % 12 + 12) % 12 + 1;
+/** Signed shortest month offset from a to b (-6..+6). */
+function monthOffset(a, b) {
+  let d = (b - a) % 12; if (d > 6) d -= 12; if (d < -6) d += 12; return d;
+}
+
+function buildRows() {
+  ROWS = [];
+  for (const c of CROPS) {
+    const z6 = (c.data.zones && (c.data.zones['6'] || c.data.zones[6])) || null;
+    for (const z of ZONES) {
+      const prose = (c.data.planting && c.data.planting['zone' + z]) || '';
+      const existing = (c.data.zones && (c.data.zones[String(z)] || c.data.zones[z])) || null;
+      const p = parsePlanting(prose);
+      let ps = null, pe = null, hs = null, he = null, conf = 'none', basis = '-';
+      if (p) {
+        ps = p.start; pe = p.end; conf = p.confidence; basis = p.basis;
+        // Derive harvest by shifting zone 6's harvest by the planting difference.
+        if (z6 && z6.plantingStart && z6.harvestStart && z6.harvestEnd) {
+          const off = monthOffset(z6.plantingStart, ps);
+          hs = wrap12(z6.harvestStart + off);
+          he = wrap12(z6.harvestEnd + off);
+        }
+      }
+      // Anything already stored wins — don't silently overwrite real data.
+      if (existing && existing.plantingStart) {
+        ps = existing.plantingStart; pe = existing.plantingEnd;
+        hs = existing.harvestStart;  he = existing.harvestEnd;
+        conf = 'high'; basis = 'already stored';
+      }
+      ROWS.push({ id: c.id, name: c.data.name || c.id, zone: z, prose, ps, pe, hs, he,
+                  conf, basis, include: conf !== 'none', z6 });
+    }
+  }
+}
+
+function stats() {
+  return {
+    total: ROWS.length,
+    high: ROWS.filter(r => r.conf === 'high').length,
+    low:  ROWS.filter(r => r.conf === 'low').length,
+    none: ROWS.filter(r => r.conf === 'none').length,
+  };
+}
+
+function visibleRows() {
+  if (filter === 'all')  return ROWS;
+  if (filter === 'high') return ROWS.filter(r => r.conf === 'high');
+  return ROWS.filter(r => r.conf !== 'high');   // needs attention
+}
+
+function render() {
+  const s = stats();
+  document.getElementById('s-total').textContent = `${s.total} rows`;
+  document.getElementById('s-high').textContent  = `${s.high} high`;
+  document.getElementById('s-low').textContent   = `${s.low} low`;
+  document.getElementById('s-none').textContent  = `${s.none} unparsed`;
+  ['all','needs','high'].forEach(f =>
+    document.getElementById('f-' + f).classList.toggle('primary', filter === f));
+
+  const rows = visibleRows();
+  const host = document.getElementById('table-host');
+  if (!rows.length) { host.innerHTML = '<div style="padding:2rem;color:var(--ts)">Nothing in this view.</div>'; return; }
+
+  host.innerHTML = `<table><thead><tr>
+    <th>Use</th><th>Crop</th><th>Zone</th><th>Prose (your data)</th>
+    <th>Plant start</th><th>Plant end</th><th>Harvest start</th><th>Harvest end</th>
+    <th>Basis</th><th>Zone 6 ref</th>
+  </tr></thead><tbody>${rows.map(r => {
+    const i = ROWS.indexOf(r);
+    const cls = r.conf === 'none' ? 'noparse' : r.conf === 'low' ? 'lowconf' : '';
+    const badge = r.conf === 'high' ? 'b-high' : r.conf === 'low' ? 'b-low' : 'b-none';
+    const z6ref = r.z6 && r.z6.plantingStart
+      ? `p ${r.z6.plantingStart}-${r.z6.plantingEnd} / h ${r.z6.harvestStart}-${r.z6.harvestEnd}` : '—';
+    const num = (field, val) =>
+      `<input type="number" min="1" max="12" value="${val ?? ''}" onchange="setVal(${i},'${field}',this.value)">`;
+    return `<tr class="${cls}${r.include ? '' : ' excluded'}" id="row-${i}">
+      <td><input type="checkbox" ${r.include ? 'checked' : ''} onchange="setInc(${i},this.checked)"></td>
+      <td class="crop">${esc(r.name)}</td>
+      <td class="mono">${r.zone}</td>
+      <td class="prose">${esc(r.prose) || '<em>none</em>'}</td>
+      <td>${num('ps', r.ps)}</td><td>${num('pe', r.pe)}</td>
+      <td>${num('hs', r.hs)}</td><td>${num('he', r.he)}</td>
+      <td><span class="badge ${badge}">${esc(r.basis)}</span></td>
+      <td class="mono" style="color:var(--tt);white-space:nowrap">${esc(z6ref)}</td>
+    </tr>`;
+  }).join('')}</tbody></table>`;
+}
+
+function setVal(i, field, v) {
+  const n = parseInt(v, 10);
+  ROWS[i][field] = (n >= 1 && n <= 12) ? n : null;
+}
+function setInc(i, on) {
+  ROWS[i].include = on;
+  document.getElementById('row-' + i)?.classList.toggle('excluded', !on);
+}
+function setFilter(f) { filter = f; render(); }
+function toggleAll(on) { visibleRows().forEach(r => { r.include = on; }); render(); }
+
+function rowComplete(r) {
+  return [r.ps, r.pe, r.hs, r.he].every(v => v >= 1 && v <= 12);
+}
+
+async function writeAll() {
+  if (!isAdmin()) { status('err', 'You are not signed in as the admin account.'); return; }
+  const picked = ROWS.filter(r => r.include);
+  const ready  = picked.filter(rowComplete);
+  const skipped = picked.length - ready.length;
+  if (!ready.length) { status('err', 'No included rows have all four month values filled in.'); return; }
+  if (!confirm(`Write ${ready.length} zone windows across ${new Set(ready.map(r=>r.id)).size} crops?` +
+      (skipped ? `\n\n${skipped} included row(s) are incomplete and will be skipped.` : ''))) return;
+
+  const btn = document.getElementById('write-btn');
+  btn.disabled = true; btn.textContent = 'Writing…';
+  // Group by crop so each document is written once.
+  const byCrop = new Map();
+  for (const r of ready) {
+    if (!byCrop.has(r.id)) byCrop.set(r.id, {});
+    byCrop.get(r.id)[String(r.zone)] = {
+      timing:        r.prose || '',
+      plantingStart: r.ps, plantingEnd: r.pe,
+      harvestStart:  r.hs, harvestEnd:  r.he,
+      notes:         '',
+    };
+  }
+  let ok = 0, failed = 0;
+  for (const [id, zones] of byCrop) {
+    try { await window._saveZones(id, zones); ok++; log(`✓ ${id}: ${Object.keys(zones).length} zones`); }
+    catch(e) { failed++; log(`✗ ${id}: ${e.message}`); }
+  }
+  btn.disabled = false; btn.textContent = 'Write included rows to Firestore';
+  status(failed ? 'err' : 'okb',
+    `Wrote ${ok} crop${ok===1?'':'s'}${failed ? `, ${failed} failed — see log` : ''}${skipped ? `, ${skipped} incomplete row(s) skipped` : ''}.`);
+  if (ok) { await loadAll(); }
+}
+
+function status(kind, msg) {
+  document.getElementById('status').innerHTML = `<div class="box ${kind}">${esc(msg)}</div>`;
+}
+
+function isAdmin() {
+  const u = window._currentUser;
+  return !!(u && ADMIN_UIDS.includes(u.uid));
+}
+
+function renderAuth() {
+  const el = document.getElementById('auth-box');
+  const u  = window._currentUser;
+  if (isAdmin()) {
+    el.innerHTML = `<div class="box okb">Signed in as the admin account — writes are enabled.</div>`;
+  } else if (u) {
+    el.innerHTML = `<div class="box err">Signed in, but this is not the admin account (uid <code>${esc(u.uid)}</code>). Firestore will reject writes.</div>`;
+  } else {
+    el.innerHTML = `<div class="box err">Not signed in. Open <a href="index.html" style="color:inherit;text-decoration:underline">the planner</a>, sign in as the admin account, then reload this page. You can still review proposals below.</div>`;
+  }
+  document.getElementById('write-btn').disabled = !isAdmin();
+}
+
+async function loadAll() {
+  CROPS = await window._loadCrops();
+  CROPS.sort((a,b) => (a.data.name||'').localeCompare(b.data.name||''));
+  buildRows();
+  document.getElementById('controls').style.display = 'flex';
+  render();
+  log(`Loaded ${CROPS.length} crops → ${ROWS.length} zone rows.`);
+}
+
+(async () => {
+  await new Promise(res => window.addEventListener('fb-ready', res, { once: true }));
+  window._authReady.then(renderAuth);
+  try { await loadAll(); }
+  catch(e) {
+    document.getElementById('table-host').innerHTML =
+      `<div style="padding:2rem;color:var(--rt)">Could not load crops: ${esc(e.message)}</div>`;
+  }
+})();
+</script>
+</body>
+</html>
