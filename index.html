@@ -349,7 +349,33 @@ a{color:inherit;text-decoration:none}
 .topbar{display:flex;gap:12px;margin-bottom:1.25rem;align-items:center;flex-wrap:wrap}
 .topbar input{flex:1;min-width:180px;height:46px;padding:0 16px;font-size:16px}
 .greenbtn{white-space:nowrap;padding:0 22px;height:46px;border:1px solid var(--gn);border-radius:8px;background:var(--gn);color:#EAF3DE;font-size:16px}
+.type-row{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:.85rem}
+.tybtn{padding:8px 15px;border:1px solid var(--b2);border-radius:8px;background:var(--p);color:var(--ts);font-size:14px;font-weight:500;display:inline-flex;align-items:center;gap:7px}
+.tybtn:hover{background:var(--s)}
+.tybtn.on{background:var(--gn);color:#EAF3DE;border-color:var(--gn)}
+.tycount{font-size:11px;padding:1px 7px;border-radius:9px;background:var(--s);color:var(--tt)}
+.tybtn.on .tycount{background:rgba(255,255,255,.22);color:#EAF3DE}
 .cat-row{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:1.25rem}
+
+/* Varieties tab */
+.vgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}
+.vcard{border:1px solid var(--b1);border-radius:10px;padding:14px;background:var(--p)}
+.vcard.rec{border-color:var(--gn)}
+.vname{font-size:15px;font-weight:500;color:var(--tp);margin-bottom:4px}
+.vkind{display:inline-block;font-size:11px;padding:2px 8px;border-radius:9px;background:var(--s);color:var(--tt);margin-left:6px;vertical-align:middle}
+.vrec{display:inline-block;font-size:11px;padding:2px 8px;border-radius:9px;background:var(--gnb);color:var(--gnt);margin-left:6px;vertical-align:middle}
+.vdesc{font-size:13px;color:var(--ts);line-height:1.55;margin-bottom:8px}
+.vmeta{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.vchip{font-size:11px;padding:3px 9px;border-radius:9px;background:var(--s);color:var(--ts)}
+.vzone{font-size:11px;padding:3px 8px;border-radius:9px;background:var(--lb);color:var(--lt)}
+.vzone.hit{background:var(--gnb);color:var(--gnt);font-weight:500}
+.vfilter{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--ts);margin-bottom:1rem}
+.vfilter button{padding:6px 13px;border:1px solid var(--b2);border-radius:7px;background:var(--p);color:var(--ts);font-size:13px}
+.vfilter button.on{background:var(--gn);color:#EAF3DE;border-color:var(--gn)}
+.vrow{display:flex;gap:8px;align-items:flex-start;margin-bottom:8px;flex-wrap:wrap}
+.vrow input{flex:1;min-width:90px}
+.vzpick{display:flex;flex-wrap:wrap;gap:5px;align-items:center}
+.vzpick label{font-size:12px;color:var(--ts);display:inline-flex;align-items:center;gap:3px;padding:2px 6px;border:1px solid var(--b1);border-radius:6px}
 .cbtn{padding:7px 16px;border:1px solid var(--b2);border-radius:20px;background:var(--p);color:var(--ts);font-size:14px}
 .cbtn.on{background:var(--gn);color:#EAF3DE;border-color:var(--gn)}
 .pgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin-bottom:2rem}
@@ -738,6 +764,7 @@ a{color:inherit;text-decoration:none}
         <input type="text" id="search" placeholder="Search plants…" oninput="renderGrid()">
         <button class="greenbtn" id="add-crop-btn" onclick="openAdd()" style="display:none">+ Add crop</button>
       </div>
+      <div class="type-row" id="type-row"></div>
       <div class="cat-row" id="cat-row"></div>
       <div class="sel-bar" id="sel-bar">
         <span class="sel-count" id="sel-count"></span>
@@ -827,7 +854,9 @@ a{color:inherit;text-decoration:none}
 let PLANTS       = [];   // [{data, sha, filename, path}]
 let isDark       = false;
 let activeZone   = 6;
-let activeFilter = 'All';
+let activeType   = 'All';  // top-level plant-type filter
+let activeFilter = 'All';  // category pill, scoped to the active type
+let varietyZoneOnly = false;  // Varieties tab: limit to the active zone
 let currentId    = null;
 let editingPlant = null;
 let isNew        = false;
@@ -1011,21 +1040,91 @@ function showChartSection(sec) {
   if (sec === 'companions') { renderCompanions(); cR = true; }
 }
 
-function getCats() { return ['All', ...new Set(PLANTS.map(p => p.data.cat))]; }
+// ─── Plant types ──────────────────────────────────────────
+const CROP_TYPES = ['vegetable','fruit','tree','shrub','vine','herb','ornamental','cover crop','bulb','aquatic'];
+
+// Top-level filter row shown above the category pills.
+const TYPE_GROUPS = [
+  { key:'All',        label:'All',        types:null },
+  { key:'vegetable',  label:'Vegetables', types:['vegetable'] },
+  { key:'fruit',      label:'Fruits',     types:['fruit'] },
+  { key:'tree',       label:'Trees',      types:['tree'] },
+  { key:'shrub',      label:'Shrubs',     types:['shrub'] },
+  { key:'vine',       label:'Vines',      types:['vine'] },
+  { key:'herb',       label:'Herbs',      types:['herb'] },
+  { key:'ornamental', label:'Flowers',    types:['ornamental'] },
+  { key:'other',      label:'Other',      types:['cover crop','bulb','aquatic'] },
+];
+
+// Existing crop records predate the `type` field, so fall back to inferring it
+// from the category. An explicit d.type always wins.
+function cropType(d) {
+  const t = (d.type || '').toLowerCase().trim();
+  if (t && CROP_TYPES.includes(t)) return t;
+  const c = (d.cat || '').toLowerCase();
+  if (/tree/.test(c))                       return 'tree';
+  if (/shrub|berry|bush/.test(c))           return 'shrub';
+  if (/vine/.test(c))                       return 'vine';
+  if (/herb/.test(c))                       return 'herb';
+  if (/flower|ornamental/.test(c))          return 'ornamental';
+  if (/cover crop/.test(c))                 return 'cover crop';
+  if (/bulb/.test(c))                       return 'bulb';
+  if (/aquatic|water/.test(c))              return 'aquatic';
+  return 'vegetable';
+}
+function typeName(d) { const t = cropType(d); return t.charAt(0).toUpperCase() + t.slice(1); }
+// Woody perennials get a mature-size card rather than a harvest-size one.
+function isWoody(d)  { return ['tree','shrub','vine'].includes(cropType(d)); }
+// Ornamentals aren't eaten, so nutrition figures are meaningless for them.
+function isEdible(d) { return cropType(d) !== 'ornamental'; }
+function getVarieties(d) {
+  return Array.isArray(d.varieties) ? d.varieties.filter(v => v && (v.name || '').trim()) : [];
+}
+function matchesType(d) {
+  if (activeType === 'All') return true;
+  const g = TYPE_GROUPS.find(x => x.key === activeType);
+  return !!(g && g.types && g.types.includes(cropType(d)));
+}
+
+function renderTypeRow() {
+  const el = document.getElementById('type-row'); if (!el) return;
+  const counts = {};
+  PLANTS.forEach(p => { const t = cropType(p.data); counts[t] = (counts[t] || 0) + 1; });
+  // Only offer groups that actually have plants, so the row stays honest.
+  const groups = TYPE_GROUPS.filter(g => !g.types || g.types.some(t => counts[t]));
+  if (groups.length <= 1) { el.innerHTML = ''; return; }
+  el.innerHTML = groups.map(g => {
+    const n = g.types ? g.types.reduce((s,t) => s + (counts[t] || 0), 0) : PLANTS.length;
+    return `<button class="tybtn${g.key === activeType ? ' on' : ''}" onclick="setType('${esc(g.key)}')">${esc(g.label)} <span class="tycount">${n}</span></button>`;
+  }).join('');
+}
+function setType(k) {
+  activeType   = k;
+  activeFilter = 'All';   // category pills are scoped to the chosen type
+  renderTypeRow(); renderTypeRow(); renderCatRow(); renderGrid();
+}
+
+function getCats() {
+  return ['All', ...new Set(PLANTS.filter(p => matchesType(p.data)).map(p => p.data.cat))];
+}
 
 function renderCatRow() {
   const el = document.getElementById('cat-row'); if (!el) return;
-  el.innerHTML = getCats().map(c =>
+  const cats = getCats();
+  // A single "All" pill tells the user nothing — hide the row entirely.
+  el.innerHTML = cats.length <= 2 ? '' : cats.map(c =>
     `<button class="cbtn${c === activeFilter ? ' on' : ''}" onclick="setFilter('${esc(c)}')">${esc(c)}</button>`
   ).join('');
 }
-function setFilter(cat) { activeFilter = cat; renderCatRow(); renderGrid(); }
+function setFilter(cat) { activeFilter = cat; renderTypeRow(); renderCatRow(); renderGrid(); }
 
 function renderGrid() {
   const q  = document.getElementById('search')?.value?.toLowerCase() || '';
   let fl = PLANTS.filter(p =>
+    matchesType(p.data) &&
     (activeFilter === 'All' || p.data.cat === activeFilter) &&
-    (!q || p.data.name?.toLowerCase().includes(q) || p.data.cat?.toLowerCase().includes(q))
+    (!q || p.data.name?.toLowerCase().includes(q) || p.data.cat?.toLowerCase().includes(q) ||
+      getVarieties(p.data).some(v => (v.name || '').toLowerCase().includes(q)))
   );
   // Sort: selected first, then alphabetical within each group
   fl = [...fl].sort((a, b) => {
@@ -1068,7 +1167,7 @@ function showDetail(id) {
   showTab('planting');
 }
 function showList() {
-  renderCatRow(); renderGrid();
+  renderTypeRow(); renderCatRow(); renderGrid();
   document.getElementById('plist').style.display   = 'block';
   document.getElementById('pdetail').style.display = 'none';
 }
@@ -1223,13 +1322,90 @@ function buildComp(d) {
 <div class="abox awarn" style="margin-top:1rem"><strong>Distance note:</strong> ${esc(d.companionDist||'')}</div>
 <div class="sh">Beneficial animals</div><div style="font-size:14px;color:var(--ts);line-height:1.6">${esc(d.animals||'')}</div>`;
 }
+// Mature size — only shown for woody perennials (trees, shrubs, vines).
+function buildMature(d) {
+  const m = d.mature || {};
+  const rows = [
+    ['Mature height',  m.height],
+    ['Mature spread',  m.spread],
+    ['Years to fruit', m.yearsToFruit],
+    ['Lifespan',       m.lifespan],
+  ].filter(([, v]) => v != null && String(v).trim() !== '');
+  if (!rows.length) return `<div class="abox ainfo">No mature-size data recorded yet.</div>`;
+  return `<div class="igrid">${rows.map(([l, v]) =>
+    `<div class="icard"><div class="ilabel">${esc(l)}</div><div class="ival">${esc(String(v))}</div></div>`
+  ).join('')}</div>`;
+}
+
+function varietySuitsZone(v) {
+  // No zone list means "no restriction recorded", so treat it as suitable.
+  if (!Array.isArray(v.zones) || !v.zones.length) return true;
+  return v.zones.map(String).includes(String(activeZone));
+}
+
+function buildVarieties(d) {
+  const all = getVarieties(d);
+  if (!all.length) {
+    return `<div class="abox ainfo">No varieties recorded for ${esc(d.name)} yet.${
+      isAdmin() ? ' Use <strong>Edit</strong> to add some.' : ''}</div>`;
+  }
+  const shown  = varietyZoneOnly ? all.filter(varietySuitsZone) : all;
+  const hidden = all.length - shown.length;
+
+  const filterBar = `<div class="vfilter">
+    <span>${all.length} ${all.length === 1 ? 'variety' : 'varieties'}</span>
+    <button class="${varietyZoneOnly ? 'on' : ''}" onclick="toggleVarietyZoneFilter()">
+      ${varietyZoneOnly ? `Showing zone ${activeZone} only` : `Filter to zone ${activeZone}`}
+    </button>
+    ${varietyZoneOnly && hidden > 0 ? `<span style="color:var(--tt)">${hidden} hidden</span>` : ''}
+  </div>`;
+
+  if (!shown.length) {
+    return filterBar + `<div class="abox awarn">None of the recorded varieties are marked for zone ${activeZone}.</div>`;
+  }
+
+  const cards = shown.map(v => {
+    const zones = Array.isArray(v.zones) && v.zones.length
+      ? `<div class="vmeta">${v.zones.slice().sort((a,b)=>a-b).map(z =>
+          `<span class="vzone${String(z) === String(activeZone) ? ' hit' : ''}">Zone ${esc(String(z))}</span>`).join('')}</div>`
+      : `<div class="vmeta"><span class="vchip">All zones / not recorded</span></div>`;
+    const chips = [
+      v.daysToMaturity ? `<span class="vchip">${esc(String(v.daysToMaturity))} days to maturity</span>` : '',
+      v.flavorProfile  ? `<span class="vchip">${esc(v.flavorProfile)}</span>` : '',
+      v.sizeNotes      ? `<span class="vchip">${esc(v.sizeNotes)}</span>` : '',
+    ].filter(Boolean).join('');
+    return `<div class="vcard${v.recommended ? ' rec' : ''}">
+      <div class="vname">${esc(v.name)}${v.kind ? `<span class="vkind">${esc(v.kind)}</span>` : ''}${
+        v.recommended ? '<span class="vrec">Recommended</span>' : ''}</div>
+      ${v.description ? `<div class="vdesc">${esc(v.description)}</div>` : ''}
+      ${chips ? `<div class="vmeta">${chips}</div>` : ''}
+      ${zones}
+    </div>`;
+  }).join('');
+
+  return filterBar + `<div class="vgrid">${cards}</div>`;
+}
+
+function toggleVarietyZoneFilter() {
+  varietyZoneOnly = !varietyZoneOnly;
+  const el = document.getElementById('tc-varieties');
+  const p  = PLANTS.find(x => x.data.id === currentId);
+  if (el && p) el.innerHTML = buildVarieties(p.data);
+}
+
 function buildDetail(d) {
+  const woody   = isWoody(d);
+  const edible  = isEdible(d);
+  const nutTab  = edible || woody;   // ornamental annuals get neither section
+  const varieties = getVarieties(d);
+  // Show the tab when there is data, or when an admin could add some.
+  const varTab  = varieties.length > 0 || isAdmin();
   return `<div class="panel">
 <div class="ph">
   <div class="ph-icon">${esc(d.emoji)}</div>
   <div>
     <div class="ph-title">${esc(d.name)}</div>
-    <div class="ph-sub">${esc(d.cat)} · Zone ${activeZone}${isAdmin() ? ` ·
+    <div class="ph-sub">${esc(d.cat)} · ${esc(typeName(d))} · Zone ${activeZone}${isAdmin() ? ` ·
       <button style="background:none;border:none;color:var(--gn);cursor:pointer;font-size:14px;padding:0" onclick="openEdit('${esc(d.id)}')">Edit</button>` : ''}
     </div>
   </div>
@@ -1237,7 +1413,10 @@ function buildDetail(d) {
 <div class="stabs">
   <button class="stab on" data-tab="planting" onclick="showTab('planting')">Planting</button>
   <button class="stab" data-tab="care" onclick="showTab('care')">Care</button>
-  <button class="stab" data-tab="nutrition" onclick="showTab('nutrition')">Nutrition & size</button>
+  ${varTab ? `<button class="stab" data-tab="varieties" onclick="showTab('varieties')">Varieties${
+    varieties.length ? ` (${varieties.length})` : ''}</button>` : ''}
+  ${nutTab ? `<button class="stab" data-tab="nutrition" onclick="showTab('nutrition')">${
+    edible ? (woody ? 'Nutrition & size' : 'Nutrition & size') : 'Mature size'}</button>` : ''}
   <button class="stab" data-tab="companions" onclick="showTab('companions')">Companions</button>
   <button class="stab" data-tab="problems" onclick="showTab('problems')">Diseases & pests</button>
   <button class="stab" data-tab="growth" onclick="showTab('growth')">Growth stages</button>
@@ -1264,10 +1443,12 @@ function buildDetail(d) {
   </div>
   <div class="abox atip"><strong>Frequency:</strong> ${esc(d.fertilizer?.freq)}</div>
 </div>
-<div id="tc-nutrition" class="tc">
-  <div class="sh" style="margin-top:0">Nutritional profile</div>${buildNut(d)}
-  <div class="sh">Average size at harvest</div>${buildSize(d)}
-</div>
+${varTab ? `<div id="tc-varieties" class="tc">${buildVarieties(d)}</div>` : ''}
+${nutTab ? `<div id="tc-nutrition" class="tc">
+  ${woody ? `<div class="sh" style="margin-top:0">Mature size</div>${buildMature(d)}` : ''}
+  ${edible ? `<div class="sh"${woody ? '' : ' style="margin-top:0"'}>Nutritional profile</div>${buildNut(d)}
+  <div class="sh">Average size at harvest</div>${buildSize(d)}` : ''}
+</div>` : ''}
 <div id="tc-companions" class="tc">${buildComp(d)}</div>
 <div id="tc-problems" class="tc">
   <div class="sh">Common diseases</div>
@@ -1298,7 +1479,7 @@ async function deletePlant(id) {
   }
   PLANTS = PLANTS.filter(x => x.data.id !== id);
   cR=false; rR=false; nR=false; chR=false;
-  renderCatRow(); renderGrid();
+  renderTypeRow(); renderCatRow(); renderGrid();
   if (currentId === id) { currentId = null; showList(); }
   toast('ok', `Deleted ${p.data.name}`);
 }
@@ -1313,7 +1494,8 @@ function openEdit(id) {
 function openAdd() {
   if (!isAdmin()) { toast('err','You must be signed in to add crops.'); return; }
   editingPlant = {
-    data:{id:'',name:'',cat:'',emoji:'🌱',
+    data:{id:'',name:'',cat:'',emoji:'🌱',type:'vegetable',
+      varieties:[],mature:{height:'',spread:'',yearsToFruit:'',lifespan:''},
       planting:{zone6:'',depth:'',spacing:'',ph:'6.0–7.0',sun:'Full sun'},
       water:{in:'1',note:''},fertilizer:{type:'',amount:'',freq:''},
       companions:{good:[],bad:[]},companionDist:'',animals:'',
@@ -1344,6 +1526,16 @@ function renderEditModal() {
   <div class="frow"><label>Category</label><input value="${esc(d.cat)}" oninput="editingPlant.data.cat=this.value"></div>
   <div class="frow"><label>Emoji</label><input value="${esc(d.emoji)}" oninput="editingPlant.data.emoji=this.value"></div>
 </div>
+<div class="fgrid">
+  <div class="frow"><label>Plant type</label>
+    <select onchange="setEditType(this.value)" style="height:38px">
+      ${CROP_TYPES.map(t => `<option value="${esc(t)}"${cropType(d) === t ? ' selected' : ''}>${esc(t.charAt(0).toUpperCase()+t.slice(1))}</option>`).join('')}
+    </select>
+    <div class="hint" style="font-size:12px;color:var(--tt);margin-top:4px">${
+      d.type ? 'Set explicitly.' : 'Currently inferred from the category — pick one to set it.'}</div>
+  </div>
+</div>
+<div id="mature-fields">${matureFieldsHtml(d)}</div>
 <div class="frow">
   <label>ID / filename ${isNew?'(lowercase, underscores only)':'(cannot change)'}</label>
   <input value="${esc(d.id)}" ${isNew?'':'readonly style="opacity:.5"'}
@@ -1449,10 +1641,99 @@ function renderEditModal() {
   <div class="frow"><label>Plant family</label><input value="${esc(d.rotation?.family||'')}" oninput="editingPlant.data.rotation.family=this.value"></div>
   <div class="frow"><label>Rotation cycle</label><input value="${esc(d.rotation?.cycle||'')}" oninput="editingPlant.data.rotation.cycle=this.value"></div>
 </div>
+<hr class="sdiv"><div style="font-size:14px;font-weight:500;color:var(--ts);margin-bottom:.85rem">Varieties / cultivars</div>
+<div id="vlist">${(d.varieties||[]).map(varietyEditRow).join('')}</div>
+<button class="add-row-btn" onclick="addVariety()">+ add variety</button>
 <div class="factions">
   <button onclick="cancelEdit()">Cancel</button>
   <button class="savebtn" id="save-btn" onclick="saveEdit()">${isNew?'Add crop':'Save changes'}</button>
 </div>`;
+}
+
+// ─── Edit modal: type + mature size ───────────────────────
+function setEditType(t) {
+  editingPlant.data.type = t;
+  // The mature-size fields only apply to woody perennials, so swap them in/out.
+  const host = document.getElementById('mature-fields');
+  if (host) host.innerHTML = matureFieldsHtml(editingPlant.data);
+}
+
+function matureFieldsHtml(d) {
+  if (!isWoody(d)) return '';
+  const m = d.mature || {};
+  return `<hr class="sdiv"><div style="font-size:14px;font-weight:500;color:var(--ts);margin-bottom:.85rem">Mature size (trees, shrubs, vines)</div>
+<div class="fgrid">
+  <div class="frow"><label>Mature height</label><input value="${esc(m.height||'')}" oninput="setMature('height',this.value)" placeholder="e.g. 15–25 ft"></div>
+  <div class="frow"><label>Mature spread</label><input value="${esc(m.spread||'')}" oninput="setMature('spread',this.value)" placeholder="e.g. 10–20 ft"></div>
+  <div class="frow"><label>Years to fruit</label><input value="${esc(m.yearsToFruit||'')}" oninput="setMature('yearsToFruit',this.value)" placeholder="e.g. 3–5"></div>
+  <div class="frow"><label>Lifespan</label><input value="${esc(m.lifespan||'')}" oninput="setMature('lifespan',this.value)" placeholder="e.g. 50+ years"></div>
+</div>`;
+}
+function setMature(key, val) {
+  if (!editingPlant.data.mature) editingPlant.data.mature = {};
+  editingPlant.data.mature[key] = val;
+}
+
+// ─── Edit modal: varieties ────────────────────────────────
+function varietyEditRow(v, i) {
+  const zones = Array.isArray(v.zones) ? v.zones.map(Number) : [];
+  const zpick = [3,4,5,6,7,8,9].map(z =>
+    `<label><input type="checkbox" ${zones.includes(z) ? 'checked' : ''} onchange="toggleVarietyZone(${i},${z},this.checked)">${z}</label>`
+  ).join('');
+  return `<div class="ditem" style="margin-bottom:12px">
+  <div class="vrow">
+    <input style="flex:2" placeholder="Variety name (e.g. Brandywine)" value="${esc(v.name||'')}" oninput="setVariety(${i},'name',this.value)">
+    <select style="width:150px;flex:none;height:38px" onchange="setVariety(${i},'kind',this.value)">
+      ${['','heirloom','hybrid','open-pollinated'].map(k =>
+        `<option value="${esc(k)}"${(v.kind||'') === k ? ' selected' : ''}>${k ? esc(k) : '(kind)'}</option>`).join('')}
+    </select>
+    <button class="rm-btn" onclick="rmVariety(${i})" title="Remove this variety">✕</button>
+  </div>
+  <div class="vrow">
+    <input style="width:120px;flex:none" placeholder="Days" value="${esc(String(v.daysToMaturity ?? ''))}" oninput="setVariety(${i},'daysToMaturity',this.value)">
+    <input placeholder="Flavour profile" value="${esc(v.flavorProfile||'')}" oninput="setVariety(${i},'flavorProfile',this.value)">
+    <input placeholder="Size notes" value="${esc(v.sizeNotes||'')}" oninput="setVariety(${i},'sizeNotes',this.value)">
+  </div>
+  <div class="vrow">
+    <textarea style="flex:1;min-height:44px;font-size:13px" placeholder="Description" oninput="setVariety(${i},'description',this.value)">${esc(v.description||'')}</textarea>
+  </div>
+  <div class="vrow" style="align-items:center">
+    <span style="font-size:12px;color:var(--ts)">Suited to zones:</span>
+    <span class="vzpick">${zpick}</span>
+    <label style="font-size:12px;color:var(--ts);display:inline-flex;align-items:center;gap:4px;margin-left:auto">
+      <input type="checkbox" ${v.recommended ? 'checked' : ''} onchange="setVariety(${i},'recommended',this.checked)"> Recommended
+    </label>
+  </div>
+</div>`;
+}
+function ensureVarieties() {
+  if (!Array.isArray(editingPlant.data.varieties)) editingPlant.data.varieties = [];
+  return editingPlant.data.varieties;
+}
+function setVariety(i, key, val) {
+  const vs = ensureVarieties();
+  if (!vs[i]) return;
+  vs[i][key] = key === 'recommended' ? !!val : val;
+}
+function toggleVarietyZone(i, z, on) {
+  const vs = ensureVarieties();
+  if (!vs[i]) return;
+  const cur = new Set((vs[i].zones || []).map(Number));
+  if (on) cur.add(Number(z)); else cur.delete(Number(z));
+  vs[i].zones = [...cur].sort((a,b) => a - b);
+}
+function redrawVarietyList() {
+  const el = document.getElementById('vlist');
+  if (el) el.innerHTML = ensureVarieties().map(varietyEditRow).join('');
+}
+function addVariety() {
+  ensureVarieties().push({ name:'', description:'', daysToMaturity:'', flavorProfile:'',
+                           sizeNotes:'', zones:[], kind:'', recommended:false });
+  redrawVarietyList();
+}
+function rmVariety(i) {
+  ensureVarieties().splice(i, 1);
+  redrawVarietyList();
 }
 
 function dRow(d,i){return`<div class="stage-edit-row"><input style="flex:1" placeholder="Disease name" value="${esc(d.name)}" oninput="editingPlant.data.diseases[${i}].name=this.value"><textarea style="flex:2;min-height:44px;resize:vertical;font-size:13px" oninput="editingPlant.data.diseases[${i}].desc=this.value">${esc(d.desc)}</textarea><button class="rm-btn" onclick="rmD(${i})">✕</button></div>`;}
@@ -1494,6 +1775,28 @@ async function saveEdit() {
     bad:  bn.split(',').map((nm,i)=>({name:nm.trim(),why:bw[i]?.trim()||''})).filter(x=>x.name),
   };
 
+  // Normalise varieties: drop blank rows, trim text, keep zones numeric.
+  // Firestore rejects undefined, so every field must have a concrete value.
+  if (Array.isArray(d.varieties)) {
+    d.varieties = d.varieties
+      .filter(v => v && (v.name || '').trim())
+      .map(v => ({
+        name:           (v.name || '').trim(),
+        description:    (v.description || '').trim(),
+        daysToMaturity: (v.daysToMaturity ?? '').toString().trim(),
+        flavorProfile:  (v.flavorProfile || '').trim(),
+        sizeNotes:      (v.sizeNotes || '').trim(),
+        zones:          Array.isArray(v.zones) ? [...new Set(v.zones.map(Number))].filter(z => z >= 3 && z <= 9).sort((a,b)=>a-b) : [],
+        kind:           (v.kind || '').trim(),
+        recommended:    !!v.recommended,
+      }));
+  } else {
+    d.varieties = [];
+  }
+  // Keep an explicit type so the UI stops having to infer it.
+  if (!d.type) d.type = cropType(d);
+  if (!isWoody(d)) delete d.mature;   // irrelevant for annuals
+
   await _doSave();
 }
 
@@ -1520,7 +1823,7 @@ async function _doSave() {
     cR=false; rR=false; nR=false; chR=false;
     document.getElementById('edit-modal').classList.add('hidden');
     const savedId=d.id; editingPlant=null;
-    renderCatRow(); renderGrid();
+    renderTypeRow(); renderCatRow(); renderGrid();
     if (currentId===savedId) showDetail(savedId);
     toast('ok', `Saved ${d.name}`);
   } catch(e) {
@@ -2578,6 +2881,7 @@ window.addEventListener('auth-changed', e => updateNavAuth(e.detail));
   window._authReady.then(user => updateNavAuth(user));
   try {
     await loadAllCrops();
+    renderTypeRow();
     renderCatRow();
     renderGrid();
     updateSelCount();

@@ -155,6 +155,37 @@ export default class Crop {
     this.cat   = data.cat   ?? '';
     this.emoji = data.emoji ?? '🌱';
 
+    // Broad plant type, used for the top-level filter and to decide which
+    // detail sections apply. One of: vegetable, fruit, tree, shrub, vine, herb,
+    // ornamental, cover crop, bulb, aquatic. When absent the UI infers it from
+    // `cat`, so older records keep working.
+    this.type = data.type ?? '';
+
+    // ── Varieties (named cultivars) ────────────────────────────────────────
+    // [{ name, description, daysToMaturity, flavorProfile, sizeNotes,
+    //    zones: [3..9], kind: 'heirloom' | 'hybrid' | 'open-pollinated' }]
+    this.varieties = (data.varieties ?? [])
+      .filter(v => v && (v.name ?? '').trim())
+      .map(v => ({
+        name:           v.name           ?? '',
+        description:    v.description    ?? '',
+        daysToMaturity: v.daysToMaturity ?? '',
+        flavorProfile:  v.flavorProfile  ?? '',
+        sizeNotes:      v.sizeNotes      ?? '',
+        zones:          Array.isArray(v.zones) ? v.zones.map(Number).filter(Boolean) : [],
+        kind:           v.kind           ?? '',
+        recommended:    !!v.recommended,
+      }));
+
+    // ── Mature size (trees, shrubs, vines) ────────────────────────────────
+    // Only meaningful for woody/perennial plants; ignored for annuals.
+    this.mature = {
+      height:       data.mature?.height       ?? '',
+      spread:       data.mature?.spread       ?? '',
+      yearsToFruit: data.mature?.yearsToFruit ?? '',
+      lifespan:     data.mature?.lifespan     ?? '',
+    };
+
     // ── Planting ─────────────────────────────────────────────────────────────
     this.planting = {
       zone6:   data.planting?.zone6   ?? '',
