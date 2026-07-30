@@ -7,9 +7,9 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
 <script type="module">
 import { initializeApp }                                                from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, doc, getDoc, setDoc, getDocs, collection,
-         query, where }                                                  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { getAuth, signInAnonymously, onAuthStateChanged, signOut }       from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import { initializeFirestore, doc, getDoc, setDoc, getDocs, collection,
+         query, where, connectFirestoreEmulator }                        from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getAuth, onAuthStateChanged, signOut, connectAuthEmulator }     from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
 const app = initializeApp({
   apiKey:            "AIzaSyABvIAAPYNs1WJvsCZmV0kTf7Spx-EV_Zk",
@@ -19,8 +19,19 @@ const app = initializeApp({
   messagingSenderId: "293487006691",
   appId:             "1:293487006691:web:3136660dd705d7b10946d6"
 });
-const db   = getFirestore(app);
+// Same reasoning as index.html: this page has no realtime listeners, and the
+// default webchannel stream is routinely blocked by ad/tracking blockers.
+const db   = initializeFirestore(app, { experimentalForceLongPolling: true });
 const auth = getAuth(app);
+
+// Local development only — inert in production (hostname guard).
+if (['localhost','127.0.0.1'].includes(location.hostname)) {
+  try {
+    connectAuthEmulator(auth, 'http://127.0.0.1:9099', { disableWarnings: true });
+    connectFirestoreEmulator(db, '127.0.0.1', 8080);
+    console.info('[garden-planner] Using local Firebase emulators');
+  } catch (e) { console.warn('[garden-planner] Emulator connect failed:', e.message); }
+}
 
 // Expose db helpers
 window._db = db;
@@ -63,27 +74,47 @@ window._fbSaveGarden = async function(uid, data) {
 window._auth = auth;
 window._fbSignOut = () => signOut(auth);
 
-// Session restored from localStorage (same as index.html)
+// Identity comes from Firebase, never from localStorage. Firebase restores the
+// signed-in session asynchronously, so _authReady has to wait for the first
+// onAuthStateChanged callback. It previously resolved immediately off a
+// localStorage uid, which meant the page could believe it was signed in while
+// auth.currentUser was still null — and Firestore then rejected the garden save
+// because request.auth was empty. localStorage is now only a username cache.
 window._currentUser = null;
 window._currentUsername = null;
-try {
-  const storedUid = localStorage.getItem('gp-uid');
-  const storedUN  = localStorage.getItem('gp-username');
-  if (storedUid) {
-    window._currentUser    = { uid: storedUid };
-    window._currentUsername = storedUN || null;
-  }
-} catch(e) {}
 
-window._authReady = Promise.resolve(window._currentUser);
+window._fbGetCurrentUsername = async function(uid) {
+  try {
+    const cached    = localStorage.getItem('gp-username');
+    const cachedUid = localStorage.getItem('gp-uid');
+    if (cached && cachedUid === uid) return cached;
+  } catch(e) {}
+  const snap = await getDoc(doc(db, 'users', uid));
+  return snap.exists() ? (snap.data().username || null) : null;
+};
 
-// Watch for sign-out
-onAuthStateChanged(auth, user => {
-  if (!user) {
-    window._currentUser    = null;
-    window._currentUsername = null;
-    try { localStorage.removeItem('gp-uid'); localStorage.removeItem('gp-username'); } catch(e) {}
-  }
+window._authReady = new Promise(resolve => {
+  let resolved = false;
+  onAuthStateChanged(auth, async user => {
+    if (user) {
+      window._currentUser = user;
+      let uname = window._currentUsername;
+      if (!uname) {
+        try { uname = await window._fbGetCurrentUsername(user.uid); } catch(e) { /* non-fatal */ }
+      }
+      window._currentUsername = uname || null;
+      try {
+        localStorage.setItem('gp-uid', user.uid);
+        if (uname) localStorage.setItem('gp-username', uname);
+      } catch(e) {}
+    } else {
+      window._currentUser = null;
+      window._currentUsername = null;
+      try { localStorage.removeItem('gp-uid'); localStorage.removeItem('gp-username'); } catch(e) {}
+    }
+    if (!resolved) { resolved = true; resolve(window._currentUser); }
+    window.dispatchEvent(new CustomEvent('auth-changed', { detail: window._currentUser }));
+  });
 });
 
 window.dispatchEvent(new Event('fb-ready'));
@@ -548,6 +579,12 @@ async function loadGarden(uid) {
 // ── Save garden ───────────────────────────────────────────
 async function saveGarden() {
   if (!isOwner) { toast('err', 'You can only save your own garden'); return; }
+  // The security rule matches request.auth.uid against the garden id, so a
+  // half-restored session would fail server-side with an opaque error.
+  if (!window._auth?.currentUser) {
+    toast('err', 'Your sign-in session is not ready yet — reload the page and try again.', 7000);
+    return;
+  }
   const btn = document.getElementById('save-btn');
   btn.disabled = true;
   btn.innerHTML = '<span class="spin"></span> Saving...';
@@ -562,7 +599,10 @@ async function saveGarden() {
     });
     toast('ok', 'Garden saved!');
   } catch(e) {
-    toast('err', 'Save failed: ' + e.message, 8000);
+    const denied = /permission|insufficient/i.test(e.message || '');
+    toast('err', denied
+      ? 'Save failed: this garden belongs to another account. Sign in as its owner to edit it.'
+      : 'Save failed: ' + e.message, 8000);
   } finally {
     btn.disabled = false;
     btn.innerHTML = '<i class="fa-solid fa-floppy-disk"></i> Save';
