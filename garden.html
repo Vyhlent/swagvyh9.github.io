@@ -232,11 +232,30 @@ input{font-family:inherit}
 .gcell.editable:hover{background:var(--gnb)}
 .gcell.eh.editable:hover{background:var(--rb)}
 .gcell-label{font-size:9px;color:var(--tt);text-align:center;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;width:100%;padding:0 3px;pointer-events:none}
-/* Companion overlay highlights */
-.gcell.comp-focus{outline:3px solid var(--gn);outline-offset:-3px;background:var(--gnb);z-index:2}
-.gcell.comp-good{outline:3px solid var(--gn);outline-offset:-3px;background:color-mix(in srgb,var(--gnb) 60%,transparent)}
-.gcell.comp-bad{outline:3px solid var(--rbr);outline-offset:-3px;background:color-mix(in srgb,var(--rb) 60%,transparent)}
-.gcell.comp-neutral{opacity:.45}
+/* Overlay highlights — a coloured ring, so emoji + label stay readable */
+.gcell.ov-focus{outline:3px solid var(--gn);outline-offset:-3px;background:var(--gnb);z-index:2}
+.gcell.ov-good{outline:3px solid var(--gn);outline-offset:-3px;background:color-mix(in srgb,var(--gnb) 60%,transparent)}
+.gcell.ov-soon{outline:3px solid var(--abr);outline-offset:-3px;background:color-mix(in srgb,var(--ab) 60%,transparent)}
+.gcell.ov-bad{outline:3px solid var(--rbr);outline-offset:-3px;background:color-mix(in srgb,var(--rb) 60%,transparent)}
+.gcell.ov-neutral{opacity:.45}
+.gcell.ov-unknown{outline:2px dashed var(--b2);outline-offset:-3px;opacity:.6}
+
+/* Overlay mode toggle group */
+.ov-group{display:inline-flex;gap:4px;padding:3px;border:1px solid var(--b2);border-radius:9px;background:var(--s)}
+.ovbtn{padding:5px 11px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--ts);font-size:12.5px;font-family:inherit;display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
+.ovbtn:hover{background:var(--p)}
+.ovbtn.on{background:var(--p);color:var(--gn);border-color:var(--b2);font-weight:600}
+
+/* Overlay legend */
+.ov-legend{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:7px 20px;font-size:12px;color:var(--ts);border-bottom:1px solid var(--b1);background:var(--p)}
+.ov-legend.hidden{display:none}
+.ov-key{display:inline-flex;align-items:center;gap:5px}
+.ov-swatch{width:12px;height:12px;border-radius:3px;flex-shrink:0}
+.ov-swatch.good{background:var(--gnb);border:2px solid var(--gn)}
+.ov-swatch.soon{background:var(--ab);border:2px solid var(--abr)}
+.ov-swatch.bad{background:var(--rb);border:2px solid var(--rbr)}
+.ov-swatch.unknown{border:2px dashed var(--b2)}
+.ov-ctx{margin-left:auto;color:var(--tt)}
 /* Companion tooltip */
 .comp-tooltip{
   position:fixed;z-index:200;
@@ -355,10 +374,21 @@ input{font-family:inherit}
     <button class="tbtn erase owner-only" id="tool-erase" onclick="setTool('erase')" style="display:none">
       <i class="fa-solid fa-eraser"></i> Erase
     </button>
-    <!-- Companion overlay — visible to everyone when garden has crops -->
-    <button class="tbtn companion" id="tool-companion" onclick="toggleCompanionMode()" title="Click a crop cell to highlight companions">
-      <i class="fa-solid fa-handshake-simple"></i> Companions
-    </button>
+    <!-- Overlay modes — visible to everyone, mutually exclusive -->
+    <div class="ov-group" id="overlay-group">
+      <button class="ovbtn on" data-mode="none" onclick="setOverlayMode('none')" title="No highlighting">
+        <i class="fa-solid fa-ban"></i> None
+      </button>
+      <button class="ovbtn" data-mode="companion" onclick="setOverlayMode('companion')" title="Click a crop cell to highlight its companions">
+        <i class="fa-solid fa-handshake-simple"></i> Companions
+      </button>
+      <button class="ovbtn" data-mode="planting" onclick="setOverlayMode('planting')" title="Highlight cells by planting window">
+        <i class="fa-solid fa-seedling"></i> Planting
+      </button>
+      <button class="ovbtn" data-mode="harvest" onclick="setOverlayMode('harvest')" title="Highlight cells by harvest window">
+        <i class="fa-solid fa-wheat-awn"></i> Harvest
+      </button>
+    </div>
 
     <!-- Grid resize — shown only to owner -->
     <div class="size-wrap owner-only" id="size-controls" style="display:none">
@@ -426,8 +456,11 @@ input{font-family:inherit}
       </div>
     </div>
 
-    <div class="grid-area">
-      <div class="garden-grid" id="garden-grid"></div>
+    <div style="flex:1;display:flex;flex-direction:column;min-width:0">
+      <div class="ov-legend hidden" id="overlay-legend"></div>
+      <div class="grid-area">
+        <div class="garden-grid" id="garden-grid"></div>
+      </div>
     </div>
   </div>
 
@@ -484,9 +517,13 @@ let painting     = false;
 let isOwner      = false;      // set after auth resolves
 let ownerUid     = null;       // uid of the garden owner
 
-// ── Companion overlay ─────────────────────────────────────
-let companionMode  = false;    // is companion mode active?
-let focusCellKey   = null;     // currently focused cell key ("r,c")
+// ── Grid overlays ─────────────────────────────────────────
+// Mutually exclusive: 'none' | 'companion' | 'planting' | 'harvest'
+let overlayMode  = 'none';
+let focusCellKey = null;       // companion mode: focused cell key ("r,c")
+const isCompanionMode = () => overlayMode === 'companion';
+const overlayActive   = () => overlayMode !== 'none';
+const MONTH_NAMES = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
 // Apply dark mode immediately
 try { if (localStorage.getItem('gp-dark') === '1') { isDark = true; document.body.classList.add('dark'); document.getElementById('loading-overlay').classList.add('dark'); } } catch(e) {}
@@ -511,6 +548,12 @@ function applyZone() {
 function setZone(z) {
   activeZone = z;
   try { localStorage.setItem('gp-zone', String(z)); } catch(e) {}
+  // Planting/harvest windows are per-zone, so the overlay has to be recomputed.
+  if (overlayActive()) applyOverlay();
+  // Recommendations are zone-based too; refresh if the panel is already built.
+  if (typeof buildRecommendations === 'function' && document.getElementById('recs-body')) {
+    buildRecommendations();
+  }
 }
 
 function applyDark() {
@@ -627,12 +670,9 @@ function renderSidebar() {
 }
 function selectCrop(emoji, name) {
   if (!isOwner) return;
-  // Exit companion mode when selecting a crop to draw
-  if (companionMode) {
-    companionMode = false;
-    document.getElementById('tool-companion').classList.remove('active');
-    clearCompanionHighlights();
-  }
+  // Companion mode owns the click, so leave it when picking a crop to draw.
+  // The passive planting/harvest overlays can stay on while drawing.
+  if (isCompanionMode()) setOverlayMode('none');
   selectedCrop = { emoji, name };
   setTool('draw');
   document.getElementById('selected-label').textContent = emoji + ' ' + name;
@@ -648,19 +688,116 @@ function setTool(t) {
   document.querySelectorAll('.gcell').forEach(c => c.classList.toggle('eh', t==='erase'));
 }
 
-// ── Companion overlay mode ────────────────────────────────
-function toggleCompanionMode() {
-  companionMode = !companionMode;
-  const btn = document.getElementById('tool-companion');
-  btn.classList.toggle('active', companionMode);
-  if (!companionMode) {
-    focusCellKey = null;
-    clearCompanionHighlights();
-  } else {
-    // Exit draw/erase painting when companion mode is on
-    painting = false;
-    toast('info', 'Click any crop cell to highlight its companions', 3000);
+// ── Overlay modes ─────────────────────────────────────────
+function setOverlayMode(mode) {
+  overlayMode = mode;
+  if (mode !== 'companion') { focusCellKey = null; hideOverlayTooltip(); }
+  if (mode === 'companion') painting = false;   // don't paint while picking a focus crop
+  document.querySelectorAll('#overlay-group .ovbtn')
+    .forEach(b => b.classList.toggle('on', b.dataset.mode === mode));
+  try { localStorage.setItem('gp-overlay', mode); } catch(e) {}
+  applyOverlay();
+  if (mode === 'companion') toast('info', 'Click any crop cell to highlight its companions', 3000);
+}
+
+function findPlantByName(name) {
+  const n = (name || '').toLowerCase();
+  return n ? PLANTS.find(p => (p.data.name || '').toLowerCase() === n) || null : null;
+}
+
+/** Is month m inside [s,e]? Handles windows that wrap the year end. */
+function inWindow(m, s, e) { return s <= e ? (m >= s && m <= e) : (m >= s || m <= e); }
+
+/** The planting or harvest window for a crop in a zone, or null when unrecorded.
+ *  Only the structured `zones` data has month numbers; the older prose timing
+ *  strings can't be used here, which is why many crops report "unknown". */
+function cropWindow(d, zone, which) {
+  const z = String(zone);
+  const e = d && d.zones ? (d.zones[z] || d.zones['zone' + z]) : null;
+  if (!e) return null;
+  const s  = which === 'planting' ? e.plantingStart : e.harvestStart;
+  const en = which === 'planting' ? e.plantingEnd   : e.harvestEnd;
+  if (!s || !en) return null;
+  return { start: Number(s), end: Number(en) };
+}
+
+/**
+ * Pure: decide how a single cell should be highlighted.
+ * Returns { cls, tooltip, kind } — cls '' means no highlight.
+ */
+function computeCellOverlay(cell, mode, focusKey, cellKey, zone, month) {
+  if (!cell || mode === 'none') return { cls:'', tooltip:'', kind:'' };
+  const d = findPlantByName(cell.name)?.data || null;
+
+  if (mode === 'companion') {
+    if (!focusKey) return { cls:'', tooltip:'', kind:'' };
+    if (cellKey === focusKey) return { cls:'ov-focus', tooltip:'', kind:'' };
+    const focusData = findPlantByName(gridData[focusKey]?.name)?.data || null;
+    const rel = getCompanionRelation(focusData, d);
+    if (rel === 'good') return { cls:'ov-good', tooltip:getCompanionWhy(focusData,d) || 'Good companion', kind:'good' };
+    if (rel === 'bad')  return { cls:'ov-bad',  tooltip:getCompanionWhy(focusData,d) || 'Bad companion',  kind:'bad'  };
+    return { cls:'ov-neutral', tooltip:'', kind:'' };
   }
+
+  if (mode === 'planting' || mode === 'harvest') {
+    const w = cropWindow(d, zone, mode);
+    if (!w) {
+      return { cls:'ov-unknown',
+               tooltip:`No ${mode} window recorded for zone ${zone}`, kind:'' };
+    }
+    const range = `${MONTH_NAMES[w.start-1]} – ${MONTH_NAMES[w.end-1]}`;
+    const nextMonth = (month % 12) + 1;
+    if (inWindow(month, w.start, w.end)) {
+      return { cls:'ov-good', kind:'good',
+               tooltip:(mode === 'planting' ? 'Good time to plant' : 'Ready to harvest') + ` · ${range}` };
+    }
+    // "Opens within about four weeks" == the window starts next month.
+    if (w.start === nextMonth) {
+      return { cls:'ov-soon', kind:'soon',
+               tooltip:`Opens next month (${MONTH_NAMES[nextMonth-1]}) · ${range}` };
+    }
+    return { cls:'ov-bad', kind:'bad',
+             tooltip:(mode === 'planting' ? 'Outside the planting window' : 'Not ready this month') + ` · ${range}` };
+  }
+  return { cls:'', tooltip:'', kind:'' };
+}
+
+const OVERLAY_CLASSES = ['ov-focus','ov-good','ov-soon','ov-bad','ov-neutral','ov-unknown'];
+
+/** Re-apply the current overlay to every cell, and refresh the legend. */
+function applyOverlay() {
+  const month = new Date().getMonth() + 1;
+  document.querySelectorAll('.gcell[data-key]').forEach(el => {
+    el.classList.remove(...OVERLAY_CLASSES);
+    const key = el.dataset.key;
+    const { cls, tooltip } = computeCellOverlay(gridData[key], overlayMode, focusCellKey, key, activeZone, month);
+    if (cls) el.classList.add(cls);
+    if (tooltip) el.dataset.ovTip = tooltip; else delete el.dataset.ovTip;
+  });
+  renderOverlayLegend();
+}
+
+function renderOverlayLegend() {
+  const el = document.getElementById('overlay-legend');
+  if (!el) return;
+  if (overlayMode === 'none') { el.classList.add('hidden'); el.innerHTML = ''; return; }
+  const month = new Date().getMonth() + 1;
+  const ctx = `Zone ${activeZone} · ${MONTH_NAMES[month-1]} ${new Date().getFullYear()}`;
+  let keys;
+  if (overlayMode === 'companion') {
+    keys = `<span class="ov-key"><span class="ov-swatch good"></span>Good companion</span>
+            <span class="ov-key"><span class="ov-swatch bad"></span>Poor companion</span>
+            <span class="ov-key">${focusCellKey ? 'Click the focus cell again (or press Esc) to clear' : 'Click a crop cell to pick the focus crop'}</span>`;
+  } else {
+    const verb = overlayMode === 'planting' ? 'Plant now' : 'Harvest now';
+    const late = overlayMode === 'planting' ? 'Outside window' : 'Not ready';
+    keys = `<span class="ov-key"><span class="ov-swatch good"></span>${verb}</span>
+            <span class="ov-key"><span class="ov-swatch soon"></span>Opens next month</span>
+            <span class="ov-key"><span class="ov-swatch bad"></span>${late}</span>
+            <span class="ov-key"><span class="ov-swatch unknown"></span>No data for this zone</span>`;
+  }
+  el.innerHTML = keys + `<span class="ov-ctx">${esc(ctx)}</span>`;
+  el.classList.remove('hidden');
 }
 
 /** Fuzzy-match a companion name against a crop name */
@@ -707,49 +844,29 @@ function getCompanionWhy(focusCropData, otherCropData) {
   return '';
 }
 
-function clearCompanionHighlights() {
-  document.querySelectorAll('.gcell').forEach(c => {
-    c.classList.remove('comp-focus','comp-good','comp-bad','comp-neutral');
-  });
-  hideCompanionTooltip();
+function clearOverlayHighlights() {
+  document.querySelectorAll('.gcell').forEach(c => c.classList.remove(...OVERLAY_CLASSES));
+  hideOverlayTooltip();
 }
 
-function applyCompanionHighlights(focusKey) {
-  clearCompanionHighlights();
+/** Companion mode: set the focus cell and redraw. */
+function setCompanionFocus(focusKey) {
   focusCellKey = focusKey;
-  const focusCell = gridData[focusKey];
-  if (!focusCell) return;
-
-  const focusPlant = PLANTS.find(p => p.data.name?.toLowerCase() === focusCell.name?.toLowerCase());
-  const focusData  = focusPlant?.data || null;
-
-  document.querySelectorAll('.gcell[data-key]').forEach(el => {
-    const key  = el.dataset.key;
-    const cell = gridData[key];
-    if (!cell) return;
-    if (key === focusKey) { el.classList.add('comp-focus'); return; }
-
-    const otherPlant = PLANTS.find(p => p.data.name?.toLowerCase() === cell.name?.toLowerCase());
-    const rel = getCompanionRelation(focusData, otherPlant?.data || null);
-
-    if (rel === 'good')    el.classList.add('comp-good');
-    else if (rel === 'bad') el.classList.add('comp-bad');
-    else                    el.classList.add('comp-neutral');
-  });
+  applyOverlay();
 }
 
-// Companion tooltip
+// ── Overlay tooltip ───────────────────────────────────────
 const _tooltip = () => document.getElementById('comp-tooltip');
-function showCompanionTooltip(e, focusData, otherData, relation) {
-  const tt = _tooltip(); if (!tt) return;
-  const emoji = relation === 'good' ? '✓' : '✗';
-  const why   = getCompanionWhy(focusData, otherData);
-  tt.innerHTML = `<div class="ct-status ${relation}">${emoji} ${relation === 'good' ? 'Good companion' : 'Bad companion'}</div>${why ? `<div>${esc(why)}</div>` : ''}`;
+function showOverlayTooltip(e, text, kind) {
+  const tt = _tooltip(); if (!tt || !text) return;
+  const icon = kind === 'good' ? '✓' : kind === 'bad' ? '✗' : kind === 'soon' ? '◕' : 'ⓘ';
+  const cls  = kind === 'good' ? 'good' : kind === 'bad' ? 'bad' : '';
+  tt.innerHTML = `<div class="ct-status ${cls}">${icon} ${esc(text)}</div>`;
   tt.style.left = (e.clientX + 14) + 'px';
   tt.style.top  = (e.clientY - 10) + 'px';
   tt.classList.add('visible');
 }
-function hideCompanionTooltip() {
+function hideOverlayTooltip() {
   const tt = _tooltip(); if (tt) tt.classList.remove('visible');
 }
 
@@ -767,53 +884,51 @@ function renderGrid() {
       div.dataset.key = key;
       if (cell) div.innerHTML = `<span>${esc(cell.emoji)}</span><div class="gcell-label">${esc(cell.name)}</div>`;
 
-      // Owner draw/erase events
+      // Owner draw/erase events. Painting stays available in the passive
+      // planting/harvest overlays; only companion mode needs the click.
       if (isOwner) {
         div.addEventListener('mousedown', e => {
-          if (companionMode) return; // don't draw in companion mode
+          if (isCompanionMode()) return;
           e.preventDefault(); painting=true; applyTool(key, div);
         });
-        div.addEventListener('mouseenter', () => { if(painting && !companionMode) applyTool(key, div); });
+        div.addEventListener('mouseenter', () => { if(painting && !isCompanionMode()) applyTool(key, div); });
       }
 
       // Companion mode click — works for owners AND visitors
       div.addEventListener('click', e => {
-        if (!companionMode) return;
+        if (!isCompanionMode()) return;
         e.stopPropagation();
-        const cellData = gridData[key];
-        if (!cellData) { focusCellKey = null; clearCompanionHighlights(); return; }
-        if (focusCellKey === key) { focusCellKey = null; clearCompanionHighlights(); return; }
-        applyCompanionHighlights(key);
+        // Clicking empty space, or the focus cell again, clears the focus.
+        if (!gridData[key] || focusCellKey === key) { setCompanionFocus(null); return; }
+        setCompanionFocus(key);
       });
 
-      // Companion tooltip on hover
+      // Tooltip on hover — driven by whatever applyOverlay() computed.
       div.addEventListener('mousemove', e => {
-        if (!companionMode || !focusCellKey || focusCellKey === key) return hideCompanionTooltip();
-        const focusCell = gridData[focusCellKey];
-        const thisCell  = gridData[key];
-        if (!focusCell || !thisCell) return hideCompanionTooltip();
-        const focusPlant = PLANTS.find(p => p.data.name?.toLowerCase() === focusCell.name?.toLowerCase());
-        const otherPlant = PLANTS.find(p => p.data.name?.toLowerCase() === thisCell.name?.toLowerCase());
-        const rel = getCompanionRelation(focusPlant?.data, otherPlant?.data);
-        if (rel !== 'neutral') showCompanionTooltip(e, focusPlant?.data, otherPlant?.data, rel);
-        else hideCompanionTooltip();
+        if (!overlayActive()) return hideOverlayTooltip();
+        const tip = div.dataset.ovTip;
+        if (!tip) return hideOverlayTooltip();
+        const kind = div.classList.contains('ov-good') ? 'good'
+                   : div.classList.contains('ov-bad')  ? 'bad'
+                   : div.classList.contains('ov-soon') ? 'soon' : 'info';
+        showOverlayTooltip(e, tip, kind);
       });
-      div.addEventListener('mouseleave', () => { if (companionMode) hideCompanionTooltip(); });
+      div.addEventListener('mouseleave', () => { if (overlayActive()) hideOverlayTooltip(); });
 
       grid.appendChild(div);
     }
   }
-  // Re-apply highlights if companion mode is active
-  if (companionMode && focusCellKey) applyCompanionHighlights(focusCellKey);
+  // Cells were just rebuilt, so re-apply the active overlay.
+  if (overlayActive()) applyOverlay();
 }
 document.addEventListener('mouseup', () => { painting=false; });
-// Escape key clears companion focus
+// Escape clears the companion focus crop
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && companionMode) { focusCellKey = null; clearCompanionHighlights(); }
+  if (e.key === 'Escape' && isCompanionMode() && focusCellKey) setCompanionFocus(null);
 });
 
 function applyTool(key, div) {
-  if (!isOwner || companionMode) return;
+  if (!isOwner || isCompanionMode()) return;
   if (tool==='erase') {
     delete gridData[key];
     div.innerHTML = '';
@@ -822,7 +937,10 @@ function applyTool(key, div) {
     div.innerHTML = `<span>${esc(selectedCrop.emoji)}</span><div class="gcell-label">${esc(selectedCrop.name)}</div>`;
   } else if (tool==='draw' && !selectedCrop) {
     toast('info', 'Select a crop from the sidebar first');
+    return;
   }
+  // The cell's contents changed, so its overlay classification may have too.
+  if (overlayActive()) applyOverlay();
 }
 
 function resizeGrid() {
@@ -1121,6 +1239,15 @@ async function boot() {
 
   renderGrid();
   renderSidebar();
+
+  // Restore the overlay mode the user last used. Companion mode needs a focus
+  // crop chosen by hand, so it starts with nothing highlighted.
+  try {
+    const saved = localStorage.getItem('gp-overlay');
+    if (saved && ['none','companion','planting','harvest'].includes(saved) && saved !== 'none') {
+      setOverlayMode(saved);
+    }
+  } catch(e) {}
 
   if (isOwner && Object.keys(gridData).length === 0) {
     toast('info', 'Your garden is empty — pick a crop and start drawing!');
