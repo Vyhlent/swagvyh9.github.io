@@ -36,6 +36,10 @@ window._loadCrops = async () => {
   snap.forEach(d => out.push({ id: d.id, data: d.data() }));
   return out;
 };
+// Create a whole crop document (used by the missing-crop import).
+window._writeCrop = async (id, data) => {
+  await setDoc(doc(db, 'crops', id), data);
+};
 // Merge zone data into a crop without disturbing its other fields.
 window._saveZones = async (id, zones) => {
   const ref  = doc(db, 'crops', id);
@@ -122,10 +126,22 @@ input[type=number]:focus{outline:none;border-color:var(--gn)}
   </p>
 
   <div class="box warn">
-    <strong>These are proposals, not facts.</strong> Planting months come from your own prose.
-    Harvest months are <em>derived</em>: the zone 6 harvest window shifted by the same number of
-    months as the planting difference. That is a reasonable rule of thumb, not a horticultural
-    source — please sanity-check rows before writing, especially amber and red ones.
+    <strong>These are proposals, not facts — review before writing.</strong>
+    <div style="margin-top:6px">
+      <strong>Planting months</strong> are read from your own prose for that zone.
+    </div>
+    <div style="margin-top:4px">
+      <strong>Harvest months</strong> are only filled in when the crop documents a
+      days-to-maturity figure (e.g. “60–85 days from transplant”), computed as planting month
+      + maturity. That covers the annual vegetables and nothing else — trees, berries, herbs and
+      other perennials have no maturity figure, so their harvest is left
+      <strong>blank / no data</strong> rather than guessed. Fill those in by hand if you know them.
+    </div>
+    <div style="margin-top:4px">
+      <strong>Hardiness</strong> is read from wording like “not reliably hardy”, “container only”
+      or “outdoors Jun–Aug only”. Where a crop cannot survive a zone, the grid overlay will show
+      it red for the months it would die.
+    </div>
   </div>
 
   <div id="auth-box"></div>
@@ -146,6 +162,19 @@ input[type=number]:focus{outline:none;border-color:var(--gn)}
     </div>
     <div id="status"></div>
     <div class="scroller" id="table-host"><div style="padding:2rem;color:var(--ts)">Loading crops…</div></div>
+  </div>
+
+  <div class="panel">
+    <div style="font-size:12px;text-transform:uppercase;letter-spacing:.05em;color:var(--tt);margin-bottom:6px">Missing crops</div>
+    <div style="font-size:13px;color:var(--ts);line-height:1.55;margin-bottom:.7rem">
+      Compares <code>crop_list.txt</code> against the crops in Firestore and imports any that were
+      never migrated, reading them straight from the <code>crops/</code> source files.
+    </div>
+    <div class="controls">
+      <button onclick="checkMissing()">Check for missing crops</button>
+      <button class="primary" id="import-btn" onclick="importMissing()" disabled>Import missing</button>
+    </div>
+    <div id="missing-status"></div>
   </div>
 
   <div class="panel">
@@ -204,37 +233,95 @@ function parsePlanting(prose) {
 }
 
 const wrap12 = m => ((m - 1) % 12 + 12) % 12 + 1;
-/** Signed shortest month offset from a to b (-6..+6). */
-function monthOffset(a, b) {
-  let d = (b - a) % 12; if (d > 6) d -= 12; if (d < -6) d += 12; return d;
+
+/** Days to maturity, accepted only from unambiguous wording.
+ *  Deliberately strict: "seeds germinate in 5–10 days" is not maturity, and
+ *  a bare number of days could mean anything. */
+const DAYS_PATTERNS = [
+  /(\d{2,3})\s*(?:–|-|to)\s*(\d{2,3})\s*days\s+(?:from|to\s+maturity|to\s+harvest)/i,
+  /(\d{2,3})\s*days\s+(?:from|to\s+maturity|to\s+harvest)/i,
+  /days\s+to\s+maturity[^0-9]{0,12}(\d{2,3})\s*(?:–|-|to)?\s*(\d{2,3})?/i,
+];
+function strictDays(cd) {
+  const pools = [
+    cd.zones && (cd.zones['6'] || cd.zones[6]) ? (cd.zones['6'] || cd.zones[6]).timing : '',
+    cd.planting && cd.planting.zone6, cd.special,
+    ...((cd.stages || []).map(s => s.desc)),
+  ].filter(Boolean);
+  for (const p of pools) for (const re of DAYS_PATTERNS) {
+    const m = re.exec(p);
+    if (m) {
+      const a = +m[1], b = m[2] ? +m[2] : +m[1];
+      if (a >= 30 && a <= 400) return { min: Math.min(a,b), max: Math.max(a,b), src: p };
+    }
+  }
+  return null;
+}
+
+/** Hardiness read from the zone's own wording.
+ *  Returns { hardy, survivalStart, survivalEnd, note } or null when nothing said. */
+function parseHardiness(prose) {
+  if (!prose) return null;
+  // "outdoors Jun–Aug only" / "outdoors May–Sep" gives an explicit survival window
+  const win = /outdoors\s+([a-z]{3})[a-z]*\s*(?:–|-|to)\s*([a-z]{3})[a-z]*/i.exec(prose);
+  const mk = s => MONTHS[s.toLowerCase().slice(0,3)];
+  if (/container only|strictly indoors/i.test(prose)) {
+    if (win) return { hardy:false, survivalStart:mk(win[1]), survivalEnd:mk(win[2]),
+                      note:'Container only — outdoors for part of the year' };
+    return { hardy:false, survivalStart:null, survivalEnd:null,
+             note:'Container only — cannot stay outdoors' };
+  }
+  if (/not\s+(?:reliably\s+)?hardy|won'?t\s+survive|will\s+not\s+survive|not\s+recommended/i.test(prose)) {
+    return { hardy:false, survivalStart:win?mk(win[1]):null, survivalEnd:win?mk(win[2]):null,
+             note:'Not reliably hardy in this zone' };
+  }
+  if (/marginal/i.test(prose)) {
+    return { hardy:true, survivalStart:null, survivalEnd:null, note:'Marginal in this zone' };
+  }
+  if (/overwinter|mulch\s+heavily|winter\s+protection|frost\s+protection|bring\s+indoors/i.test(prose)) {
+    return { hardy:true, survivalStart:null, survivalEnd:null, note:'Survives with winter protection' };
+  }
+  return null;
 }
 
 function buildRows() {
   ROWS = [];
   for (const c of CROPS) {
-    const z6 = (c.data.zones && (c.data.zones['6'] || c.data.zones[6])) || null;
+    const z6   = (c.data.zones && (c.data.zones['6'] || c.data.zones[6])) || null;
+    const days = strictDays(c.data);
     for (const z of ZONES) {
       const prose = (c.data.planting && c.data.planting['zone' + z]) || '';
       const existing = (c.data.zones && (c.data.zones[String(z)] || c.data.zones[z])) || null;
       const p = parsePlanting(prose);
-      let ps = null, pe = null, hs = null, he = null, conf = 'none', basis = '-';
+      let ps=null, pe=null, hs=null, he=null, conf='none', basis='-', hbasis='no data';
       if (p) {
         ps = p.start; pe = p.end; conf = p.confidence; basis = p.basis;
-        // Derive harvest by shifting zone 6's harvest by the planting difference.
-        if (z6 && z6.plantingStart && z6.harvestStart && z6.harvestEnd) {
-          const off = monthOffset(z6.plantingStart, ps);
-          hs = wrap12(z6.harvestStart + off);
-          he = wrap12(z6.harvestEnd + off);
+        // Harvest only when the crop documents a maturity period. No maturity
+        // figure means we genuinely don't know — leave it blank.
+        if (days) {
+          hs = wrap12(ps + Math.round(days.min / 30));
+          he = wrap12(pe + Math.round(days.max / 30));
+          hbasis = `+${days.min}–${days.max}d`;
         }
       }
+      const hard = parseHardiness(prose);
+      let hardy = hard ? hard.hardy : true;
+      let ss = hard ? hard.survivalStart : null;
+      let se = hard ? hard.survivalEnd   : null;
+      let hnote = hard ? hard.note : '';
+
       // Anything already stored wins — don't silently overwrite real data.
       if (existing && existing.plantingStart) {
         ps = existing.plantingStart; pe = existing.plantingEnd;
         hs = existing.harvestStart;  he = existing.harvestEnd;
-        conf = 'high'; basis = 'already stored';
+        if (existing.hardy === false) hardy = false;
+        if (existing.survivalStart) { ss = existing.survivalStart; se = existing.survivalEnd; }
+        if (existing.hardinessNote) hnote = existing.hardinessNote;
+        conf = 'high'; basis = 'already stored'; hbasis = 'stored';
       }
-      ROWS.push({ id: c.id, name: c.data.name || c.id, zone: z, prose, ps, pe, hs, he,
-                  conf, basis, include: conf !== 'none', z6 });
+      ROWS.push({ id:c.id, name:c.data.name || c.id, zone:z, prose, ps, pe, hs, he,
+                  hardy, ss, se, hnote, conf, basis, hbasis,
+                  include: conf !== 'none', z6, days });
     }
   }
 }
@@ -269,25 +356,33 @@ function render() {
 
   host.innerHTML = `<table><thead><tr>
     <th>Use</th><th>Crop</th><th>Zone</th><th>Prose (your data)</th>
-    <th>Plant start</th><th>Plant end</th><th>Harvest start</th><th>Harvest end</th>
-    <th>Basis</th><th>Zone 6 ref</th>
+    <th>Plant start</th><th>Plant end</th>
+    <th>Harvest start</th><th>Harvest end</th><th>Harvest from</th>
+    <th>Hardy?</th><th>Outdoors from</th><th>Outdoors to</th>
+    <th>Basis</th>
   </tr></thead><tbody>${rows.map(r => {
     const i = ROWS.indexOf(r);
     const cls = r.conf === 'none' ? 'noparse' : r.conf === 'low' ? 'lowconf' : '';
     const badge = r.conf === 'high' ? 'b-high' : r.conf === 'low' ? 'b-low' : 'b-none';
-    const z6ref = r.z6 && r.z6.plantingStart
-      ? `p ${r.z6.plantingStart}-${r.z6.plantingEnd} / h ${r.z6.harvestStart}-${r.z6.harvestEnd}` : '—';
     const num = (field, val) =>
       `<input type="number" min="1" max="12" value="${val ?? ''}" onchange="setVal(${i},'${field}',this.value)">`;
+    const hb = r.hbasis === 'no data'
+      ? `<span class="badge b-none">no data</span>`
+      : `<span class="badge b-high">${esc(r.hbasis)}</span>`;
     return `<tr class="${cls}${r.include ? '' : ' excluded'}" id="row-${i}">
       <td><input type="checkbox" ${r.include ? 'checked' : ''} onchange="setInc(${i},this.checked)"></td>
       <td class="crop">${esc(r.name)}</td>
       <td class="mono">${r.zone}</td>
-      <td class="prose">${esc(r.prose) || '<em>none</em>'}</td>
+      <td class="prose">${esc(r.prose) || '<em>none</em>'}${
+        r.hnote ? `<div style="color:var(--at);margin-top:3px">⚠ ${esc(r.hnote)}</div>` : ''}</td>
       <td>${num('ps', r.ps)}</td><td>${num('pe', r.pe)}</td>
       <td>${num('hs', r.hs)}</td><td>${num('he', r.he)}</td>
+      <td>${hb}</td>
+      <td style="text-align:center"><input type="checkbox" ${r.hardy ? 'checked' : ''}
+        title="Untick if the crop cannot survive this zone outdoors"
+        onchange="setHardy(${i},this.checked)"></td>
+      <td>${num('ss', r.ss)}</td><td>${num('se', r.se)}</td>
       <td><span class="badge ${badge}">${esc(r.basis)}</span></td>
-      <td class="mono" style="color:var(--tt);white-space:nowrap">${esc(z6ref)}</td>
     </tr>`;
   }).join('')}</tbody></table>`;
 }
@@ -296,6 +391,7 @@ function setVal(i, field, v) {
   const n = parseInt(v, 10);
   ROWS[i][field] = (n >= 1 && n <= 12) ? n : null;
 }
+function setHardy(i, on) { ROWS[i].hardy = on; }
 function setInc(i, on) {
   ROWS[i].include = on;
   document.getElementById('row-' + i)?.classList.toggle('excluded', !on);
@@ -303,8 +399,10 @@ function setInc(i, on) {
 function setFilter(f) { filter = f; render(); }
 function toggleAll(on) { visibleRows().forEach(r => { r.include = on; }); render(); }
 
+// Planting months are required; harvest is optional because "no data" is a
+// legitimate outcome for crops with no documented maturity period.
 function rowComplete(r) {
-  return [r.ps, r.pe, r.hs, r.he].every(v => v >= 1 && v <= 12);
+  return r.ps >= 1 && r.ps <= 12 && r.pe >= 1 && r.pe <= 12;
 }
 
 async function writeAll() {
@@ -312,9 +410,11 @@ async function writeAll() {
   const picked = ROWS.filter(r => r.include);
   const ready  = picked.filter(rowComplete);
   const skipped = picked.length - ready.length;
-  if (!ready.length) { status('err', 'No included rows have all four month values filled in.'); return; }
+  if (!ready.length) { status('err', 'No included rows have planting months filled in.'); return; }
+  const noHarvest = ready.filter(r => !(r.hs >= 1 && r.he >= 1)).length;
   if (!confirm(`Write ${ready.length} zone windows across ${new Set(ready.map(r=>r.id)).size} crops?` +
-      (skipped ? `\n\n${skipped} included row(s) are incomplete and will be skipped.` : ''))) return;
+      (noHarvest ? `\n\n${noHarvest} will be written with no harvest window (shown as "no data").` : '') +
+      (skipped ? `\n\n${skipped} included row(s) have no planting months and will be skipped.` : ''))) return;
 
   const btn = document.getElementById('write-btn');
   btn.disabled = true; btn.textContent = 'Writing…';
@@ -322,10 +422,18 @@ async function writeAll() {
   const byCrop = new Map();
   for (const r of ready) {
     if (!byCrop.has(r.id)) byCrop.set(r.id, {});
+    // null (not undefined) for unknown harvest — Firestore rejects undefined,
+    // and the overlay treats null as "no data" rather than guessing.
     byCrop.get(r.id)[String(r.zone)] = {
       timing:        r.prose || '',
-      plantingStart: r.ps, plantingEnd: r.pe,
-      harvestStart:  r.hs, harvestEnd:  r.he,
+      plantingStart: r.ps,
+      plantingEnd:   r.pe,
+      harvestStart:  (r.hs >= 1 && r.hs <= 12) ? r.hs : null,
+      harvestEnd:    (r.he >= 1 && r.he <= 12) ? r.he : null,
+      hardy:         r.hardy !== false,
+      survivalStart: (r.ss >= 1 && r.ss <= 12) ? r.ss : null,
+      survivalEnd:   (r.se >= 1 && r.se <= 12) ? r.se : null,
+      hardinessNote: r.hnote || '',
       notes:         '',
     };
   }
@@ -342,6 +450,51 @@ async function writeAll() {
 
 function status(kind, msg) {
   document.getElementById('status').innerHTML = `<div class="box ${kind}">${esc(msg)}</div>`;
+}
+function mstatus(kind, msg) {
+  document.getElementById('missing-status').innerHTML = `<div class="box ${kind}">${esc(msg)}</div>`;
+}
+
+// ── Missing-crop import ───────────────────────────────────
+let MISSING = [];
+async function checkMissing() {
+  MISSING = [];
+  document.getElementById('import-btn').disabled = true;
+  try {
+    const res = await fetch('crop_list.txt', { cache: 'no-store' });
+    if (!res.ok) throw new Error(`crop_list.txt returned ${res.status}`);
+    const ids = (await res.text()).split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    const have = new Set(CROPS.map(c => c.id));
+    MISSING = ids.filter(id => !have.has(id));
+    if (!MISSING.length) { mstatus('okb', `All ${ids.length} listed crops are present in Firestore.`); return; }
+    mstatus('warn', `${MISSING.length} of ${ids.length} listed crops are not in Firestore: ${MISSING.join(', ')}`);
+    document.getElementById('import-btn').disabled = !isAdmin();
+  } catch(e) {
+    mstatus('err', `Could not check: ${e.message}`);
+  }
+}
+
+async function importMissing() {
+  if (!isAdmin()) { mstatus('err', 'Only the admin account can import crops.'); return; }
+  if (!MISSING.length) { mstatus('info', 'Nothing to import — run the check first.'); return; }
+  if (!confirm(`Import ${MISSING.length} crop(s) into Firestore?\n\n${MISSING.join(', ')}`)) return;
+  const btn = document.getElementById('import-btn');
+  btn.disabled = true; btn.textContent = 'Importing…';
+  let ok = 0, failed = 0;
+  for (const id of MISSING) {
+    try {
+      // The crop files are ES modules that construct a Crop instance, so
+      // importing gives us exactly the same shape the migration produced.
+      const mod  = await import(`./crops/${id}.js`);
+      const crop = mod.default;
+      if (!crop || !crop.id) throw new Error('module has no default Crop export');
+      await window._writeCrop(crop.id, JSON.parse(JSON.stringify(crop)));
+      ok++; log(`✓ imported ${id}`);
+    } catch(e) { failed++; log(`✗ ${id}: ${e.message}`); }
+  }
+  btn.textContent = 'Import missing';
+  mstatus(failed ? 'err' : 'okb', `Imported ${ok}${failed ? `, ${failed} failed — see log` : ''}.`);
+  if (ok) { await loadAll(); await checkMissing(); }
 }
 
 function isAdmin() {

@@ -239,6 +239,9 @@ input{font-family:inherit}
 .gcell.ov-bad{outline:3px solid var(--rbr);outline-offset:-3px;background:color-mix(in srgb,var(--rb) 60%,transparent)}
 .gcell.ov-neutral{opacity:.45}
 .gcell.ov-unknown{outline:2px dashed var(--b2);outline-offset:-3px;opacity:.6}
+/* Would not survive this month — stronger than "outside window" */
+.gcell.ov-lethal{outline:3px solid var(--rbr);outline-offset:-3px;background:var(--rb)}
+.gcell.ov-lethal::after{content:'✕';position:absolute;top:1px;right:3px;font-size:10px;color:var(--rt);font-weight:700;pointer-events:none}
 
 /* Overlay mode toggle group */
 .ov-group{display:inline-flex;gap:4px;padding:3px;border:1px solid var(--b2);border-radius:9px;background:var(--s)}
@@ -254,6 +257,7 @@ input{font-family:inherit}
 .ov-swatch.good{background:var(--gnb);border:2px solid var(--gn)}
 .ov-swatch.soon{background:var(--ab);border:2px solid var(--abr)}
 .ov-swatch.bad{background:var(--rb);border:2px solid var(--rbr)}
+.ov-swatch.lethal{background:var(--rbr);border:2px solid var(--rt)}
 .ov-swatch.unknown{border:2px dashed var(--b2)}
 .ov-ctx{margin-left:auto;color:var(--tt)}
 /* Companion tooltip */
@@ -711,14 +715,33 @@ function inWindow(m, s, e) { return s <= e ? (m >= s && m <= e) : (m >= s || m <
 /** The planting or harvest window for a crop in a zone, or null when unrecorded.
  *  Only the structured `zones` data has month numbers; the older prose timing
  *  strings can't be used here, which is why many crops report "unknown". */
-function cropWindow(d, zone, which) {
+function zoneEntry(d, zone) {
   const z = String(zone);
-  const e = d && d.zones ? (d.zones[z] || d.zones['zone' + z]) : null;
+  return d && d.zones ? (d.zones[z] || d.zones['zone' + z]) || null : null;
+}
+
+function cropWindow(d, zone, which) {
+  const e = zoneEntry(d, zone);
   if (!e) return null;
   const s  = which === 'planting' ? e.plantingStart : e.harvestStart;
   const en = which === 'planting' ? e.plantingEnd   : e.harvestEnd;
   if (!s || !en) return null;
   return { start: Number(s), end: Number(en) };
+}
+
+/** Why the crop would die outdoors here this month, or '' when it's fine.
+ *  Takes precedence over planting/harvest windows — a dead plant has neither. */
+function lethalReason(d, zone, month) {
+  const e = zoneEntry(d, zone);
+  if (!e) return '';
+  const hasWindow = e.survivalStart >= 1 && e.survivalEnd >= 1;
+  if (hasWindow && !inWindow(month, e.survivalStart, e.survivalEnd)) {
+    return `Would not survive outdoors in zone ${zone} during ${MONTH_NAMES[month-1]} · safe outdoors ${MONTH_NAMES[e.survivalStart-1]}–${MONTH_NAMES[e.survivalEnd-1]}`;
+  }
+  if (e.hardy === false && !hasWindow) {
+    return e.hardinessNote ? `${e.hardinessNote} (zone ${zone})` : `Not hardy in zone ${zone} — will not survive`;
+  }
+  return '';
 }
 
 /**
@@ -740,6 +763,10 @@ function computeCellOverlay(cell, mode, focusKey, cellKey, zone, month) {
   }
 
   if (mode === 'planting' || mode === 'harvest') {
+    // A plant that can't survive the month outranks any window information.
+    const lethal = lethalReason(d, zone, month);
+    if (lethal) return { cls:'ov-lethal', kind:'bad', tooltip:lethal };
+
     const w = cropWindow(d, zone, mode);
     if (!w) {
       return { cls:'ov-unknown',
@@ -762,7 +789,7 @@ function computeCellOverlay(cell, mode, focusKey, cellKey, zone, month) {
   return { cls:'', tooltip:'', kind:'' };
 }
 
-const OVERLAY_CLASSES = ['ov-focus','ov-good','ov-soon','ov-bad','ov-neutral','ov-unknown'];
+const OVERLAY_CLASSES = ['ov-focus','ov-good','ov-soon','ov-bad','ov-neutral','ov-unknown','ov-lethal'];
 
 /** Re-apply the current overlay to every cell, and refresh the legend. */
 function applyOverlay() {
@@ -794,6 +821,7 @@ function renderOverlayLegend() {
     keys = `<span class="ov-key"><span class="ov-swatch good"></span>${verb}</span>
             <span class="ov-key"><span class="ov-swatch soon"></span>Opens next month</span>
             <span class="ov-key"><span class="ov-swatch bad"></span>${late}</span>
+            <span class="ov-key"><span class="ov-swatch lethal"></span>Would not survive</span>
             <span class="ov-key"><span class="ov-swatch unknown"></span>No data for this zone</span>`;
   }
   el.innerHTML = keys + `<span class="ov-ctx">${esc(ctx)}</span>`;

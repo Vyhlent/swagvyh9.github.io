@@ -53,10 +53,19 @@ export default class Crop {
    *     timing        {string}   - Human-readable planting timing description
    *     plantingStart {number}   - Month planting window opens  (1=Jan … 12=Dec)
    *     plantingEnd   {number}   - Month planting window closes (1=Jan … 12=Dec)
-   *     harvestStart  {number}   - Month harvest window opens
-   *     harvestEnd    {number}   - Month harvest window closes
+   *     harvestStart  {number|null} - Month harvest window opens, or null if unknown
+   *     harvestEnd    {number|null} - Month harvest window closes, or null if unknown
+   *     hardy         {boolean}  - false when the crop cannot overwinter here
+   *     survivalStart {number|null} - First month it can safely be outdoors
+   *     survivalEnd   {number|null} - Last month it can safely be outdoors
+   *     hardinessNote {string}   - e.g. "Container only", "Not reliably hardy"
    *     notes         {string}   - Any zone-specific notes (optional)
    *   }
+   *
+   * Harvest months are intentionally nullable: they are only known when the crop
+   * documents a days-to-maturity figure. The UI shows "no data" instead of a
+   * guess. Months outside survivalStart..survivalEnd (or any month when
+   * hardy is false) are shown as lethal on the garden grid.
    *
    *   Months use 1-based integers. Windows that wrap across year-end are fine
    *   (e.g. garlic: plantingStart 10, plantingEnd 11 → harvestStart 6,
@@ -216,8 +225,16 @@ export default class Crop {
           timing:        src.timing        ?? '',
           plantingStart: src.plantingStart ?? null,
           plantingEnd:   src.plantingEnd   ?? null,
+          // null means "not known" — the UI shows no data rather than guessing.
           harvestStart:  src.harvestStart  ?? null,
           harvestEnd:    src.harvestEnd    ?? null,
+          // Hardiness: hardy false means it cannot overwinter in this zone.
+          // survivalStart/End, when set, are the months it can be outdoors —
+          // the grid overlay marks every other month as lethal.
+          hardy:         src.hardy         ?? true,
+          survivalStart: src.survivalStart ?? null,
+          survivalEnd:   src.survivalEnd   ?? null,
+          hardinessNote: src.hardinessNote ?? '',
           notes:         src.notes         ?? '',
         };
       }
