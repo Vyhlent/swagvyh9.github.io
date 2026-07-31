@@ -243,6 +243,13 @@ input{font-family:inherit}
 .gcell.ov-lethal{outline:3px solid var(--rbr);outline-offset:-3px;background:var(--rb)}
 .gcell.ov-lethal::after{content:'✕';position:absolute;top:1px;right:3px;font-size:10px;color:var(--rt);font-weight:700;pointer-events:none}
 
+/* Plot switcher */
+.plot-bar{display:inline-flex;align-items:center;gap:5px;padding:3px 6px;border:1px solid var(--b2);border-radius:9px;background:var(--s)}
+.plot-select{height:28px;max-width:190px;padding:0 6px;font-size:12.5px;font-family:inherit;background:var(--p);color:var(--tp);border:1px solid var(--b2);border-radius:6px}
+.plot-select:focus{outline:none;border-color:var(--gn)}
+.plot-btn{width:28px;height:28px;display:inline-flex;align-items:center;justify-content:center;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--ts);font-size:11px;font-family:inherit}
+.plot-btn:hover{background:var(--p);border-color:var(--b2);color:var(--gn)}
+
 /* Overlay mode toggle group */
 .ov-group{display:inline-flex;gap:4px;padding:3px;border:1px solid var(--b2);border-radius:9px;background:var(--s)}
 .ovbtn{padding:5px 11px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--ts);font-size:12.5px;font-family:inherit;display:inline-flex;align-items:center;gap:5px;white-space:nowrap}
@@ -370,6 +377,15 @@ input{font-family:inherit}
 
   <div class="topbar">
     <div class="garden-title" id="garden-title">Garden</div>
+
+    <!-- Plot switcher — visitors can browse plots, owners can manage them -->
+    <div class="plot-bar" id="plot-bar" style="display:none">
+      <i class="fa-solid fa-layer-group" style="font-size:12px;color:var(--tt)"></i>
+      <select class="plot-select" id="plot-select" onchange="switchPlot(this.value)" title="Switch plot"></select>
+      <button class="plot-btn owner-only" onclick="newPlot()"    title="New plot"    style="display:none"><i class="fa-solid fa-plus"></i></button>
+      <button class="plot-btn owner-only" onclick="renamePlot()" title="Rename plot" style="display:none"><i class="fa-solid fa-pen-to-square"></i></button>
+      <button class="plot-btn owner-only" onclick="deletePlot()" title="Delete plot" style="display:none"><i class="fa-solid fa-trash"></i></button>
+    </div>
 
     <!-- Draw/Erase — shown only to owner -->
     <button class="tbtn active owner-only" id="tool-draw" onclick="setTool('draw')" style="display:none">
@@ -521,6 +537,18 @@ let painting     = false;
 let isOwner      = false;      // set after auth resolves
 let ownerUid     = null;       // uid of the garden owner
 
+// ── Plots ─────────────────────────────────────────────────
+// Plots live in a map on the single gardens/{uid} document rather than a
+// subcollection: that keeps the existing security rule and the public
+// single-read share view untouched. gridData/gridCols/gridRows always mirror
+// the ACTIVE plot, so the rest of the grid code is unchanged.
+let plots        = {};         // id -> {id, name, cols, rows, cells, createdAt}
+let plotOrder    = [];         // display order of plot ids
+let activePlotId = null;
+let dirty        = false;      // unsaved edits in memory
+const MAX_PLOTS  = 12;         // guards the 1MB Firestore document limit
+const newPlotId  = () => 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
+
 // ── Grid overlays ─────────────────────────────────────────
 // Mutually exclusive: 'none' | 'companion' | 'planting' | 'harvest'
 let overlayMode  = 'none';
@@ -580,6 +608,7 @@ async function doSignOut() {
 function applyOwnerUI() {
   document.querySelectorAll('.owner-only').forEach(el => el.style.display = isOwner ? '' : 'none');
   document.querySelectorAll('.visitor-only').forEach(el => el.style.display = !isOwner ? '' : 'none');
+  renderPlotBar();
 
   // Show user pill + sign-out for any logged-in user visiting someone else's garden
   const cu = window._currentUser;
@@ -616,12 +645,155 @@ async function loadCrops() {
 // ── Load garden by owner uid ──────────────────────────────
 async function loadGarden(uid) {
   const snap = await window._fbLoadGarden(uid);
-  if (!snap.exists()) return;
+  if (!snap.exists()) { ensureAtLeastOnePlot(); return; }
   const saved = snap.data();
-  gridData = saved.cells || {};
-  if (saved.cols) { gridCols = saved.cols; document.getElementById('grid-cols').value = gridCols; }
-  if (saved.rows) { gridRows = saved.rows; document.getElementById('grid-rows').value = gridRows; }
+
+  if (saved.plots && Object.keys(saved.plots).length) {
+    plots = {};
+    for (const [id, p] of Object.entries(saved.plots)) {
+      plots[id] = {
+        id,
+        name:  p.name  || 'Untitled plot',
+        cols:  p.cols  || 5,
+        rows:  p.rows  || 5,
+        cells: p.cells || {},
+        createdAt: p.createdAt || '',
+      };
+    }
+    plotOrder = Array.isArray(saved.plotOrder)
+      ? saved.plotOrder.filter(id => plots[id]) : [];
+    // Include any plot missing from the stored order.
+    for (const id of Object.keys(plots)) if (!plotOrder.includes(id)) plotOrder.push(id);
+    activePlotId = plots[saved.activePlotId] ? saved.activePlotId : plotOrder[0];
+  } else {
+    // Legacy single-garden document — present it as one plot. Nothing is
+    // rewritten until the owner saves, so the old shape stays readable.
+    const id = 'main';
+    plots = { [id]: {
+      id, name: 'Main garden',
+      cols: saved.cols || 5, rows: saved.rows || 5,
+      cells: saved.cells || {}, createdAt: saved.savedAt || '',
+    }};
+    plotOrder = [id];
+    activePlotId = id;
+  }
+
+  ensureAtLeastOnePlot();
+  // A ?plot= parameter wins, so plot links are shareable.
+  const wanted = new URLSearchParams(location.search).get('plot');
+  if (wanted && plots[wanted]) activePlotId = wanted;
+  loadPlotIntoGrid(activePlotId);
 }
+
+function ensureAtLeastOnePlot() {
+  if (plotOrder.length && plots[activePlotId]) return;
+  if (!plotOrder.length) {
+    const id = newPlotId();
+    plots = { [id]: { id, name:'Main garden', cols:5, rows:5, cells:{}, createdAt:new Date().toISOString() } };
+    plotOrder = [id];
+  }
+  activePlotId = plotOrder[0];
+}
+
+/** Copy the on-screen grid back into the active plot (memory only). */
+function syncActivePlot() {
+  const p = plots[activePlotId];
+  if (!p) return;
+  p.cells = gridData; p.cols = gridCols; p.rows = gridRows;
+}
+
+/** Make a plot the visible one and redraw. */
+function loadPlotIntoGrid(id) {
+  const p = plots[id];
+  if (!p) return;
+  activePlotId = id;
+  gridData = p.cells || {};
+  gridCols = p.cols || 5;
+  gridRows = p.rows || 5;
+  const colsEl = document.getElementById('grid-cols');
+  const rowsEl = document.getElementById('grid-rows');
+  if (colsEl) colsEl.value = gridCols;
+  if (rowsEl) rowsEl.value = gridRows;
+  focusCellKey = null;
+  renderGrid();
+  renderPlotBar();
+  updatePlotUrl();
+}
+
+function updatePlotUrl() {
+  try {
+    const u = new URL(location.href);
+    u.searchParams.set('plot', activePlotId);
+    history.replaceState(null, '', u);
+  } catch(e) {}
+}
+
+function renderPlotBar() {
+  const bar = document.getElementById('plot-bar');
+  const sel = document.getElementById('plot-select');
+  if (!bar || !sel) return;
+  // Hide the switcher entirely when a visitor has only one plot to look at.
+  if (!isOwner && plotOrder.length <= 1) { bar.style.display = 'none'; return; }
+  bar.style.display = '';
+  sel.innerHTML = plotOrder.map(id => {
+    const p = plots[id];
+    const n = Object.keys(p.cells || {}).length;
+    return `<option value="${esc(id)}"${id === activePlotId ? ' selected' : ''}>${esc(p.name)} (${n})</option>`;
+  }).join('');
+  bar.querySelectorAll('.owner-only').forEach(b => b.style.display = isOwner ? '' : 'none');
+}
+
+// ── Plot actions ──────────────────────────────────────────
+function switchPlot(id) {
+  if (!plots[id] || id === activePlotId) return;
+  syncActivePlot();          // keep in-memory edits to the plot we're leaving
+  loadPlotIntoGrid(id);
+  if (overlayActive()) applyOverlay();
+  toast('info', `Switched to “${plots[id].name}”`, 2000);
+}
+
+function newPlot() {
+  if (!isOwner) return;
+  if (plotOrder.length >= MAX_PLOTS) {
+    toast('err', `You can have at most ${MAX_PLOTS} plots.`, 5000); return;
+  }
+  const name = (prompt('Name for the new plot:', `Plot ${plotOrder.length + 1}`) || '').trim();
+  if (!name) return;
+  syncActivePlot();
+  const id = newPlotId();
+  plots[id] = { id, name, cols:5, rows:5, cells:{}, createdAt:new Date().toISOString() };
+  plotOrder.push(id);
+  markDirty();
+  loadPlotIntoGrid(id);
+  toast('ok', `Created “${name}” — remember to Save`, 4000);
+}
+
+function renamePlot() {
+  if (!isOwner) return;
+  const p = plots[activePlotId]; if (!p) return;
+  const name = (prompt('Rename this plot:', p.name) || '').trim();
+  if (!name || name === p.name) return;
+  p.name = name;
+  markDirty();
+  renderPlotBar();
+  toast('ok', `Renamed to “${name}” — remember to Save`, 4000);
+}
+
+function deletePlot() {
+  if (!isOwner) return;
+  if (plotOrder.length <= 1) { toast('err', 'You need at least one plot.'); return; }
+  const p = plots[activePlotId]; if (!p) return;
+  const n = Object.keys(p.cells || {}).length;
+  if (!confirm(`Delete the plot “${p.name}”${n ? ` and its ${n} planted cell${n===1?'':'s'}` : ''}?\n\nThis is applied when you next Save.`)) return;
+  const gone = activePlotId;
+  delete plots[gone];
+  plotOrder = plotOrder.filter(id => id !== gone);
+  markDirty();
+  loadPlotIntoGrid(plotOrder[0]);
+  toast('ok', `Deleted “${p.name}” — remember to Save`, 4000);
+}
+
+function markDirty() { dirty = true; }
 
 // ── Save garden ───────────────────────────────────────────
 async function saveGarden() {
@@ -632,19 +804,38 @@ async function saveGarden() {
     toast('err', 'Your sign-in session is not ready yet — reload the page and try again.', 7000);
     return;
   }
+  syncActivePlot();   // fold the on-screen grid back into the active plot
+
+  const payload = {
+    uid:      ownerUid,
+    username: TARGET_USERNAME,
+    plots:        plots,
+    plotOrder:    plotOrder,
+    activePlotId: activePlotId,
+    // Mirror the active plot at the top level so anything still reading the
+    // old single-garden shape keeps working.
+    cols:    gridCols,
+    rows:    gridRows,
+    cells:   gridData,
+    savedAt: new Date().toISOString(),
+  };
+
+  // All plots live in one document, so guard Firestore's 1MB ceiling.
+  const bytes = new Blob([JSON.stringify(payload)]).size;
+  if (bytes > 900000) {
+    toast('err', `This garden is ${(bytes/1024/1024).toFixed(2)} MB, over the 1 MB document limit. Delete a plot or shrink a grid before saving.`, 10000);
+    return;
+  }
+
   const btn = document.getElementById('save-btn');
   btn.disabled = true;
   btn.innerHTML = '<span class="spin"></span> Saving...';
   try {
-    await window._fbSaveGarden(ownerUid, {
-      uid:     ownerUid,
-      username:TARGET_USERNAME,
-      cols:    gridCols,
-      rows:    gridRows,
-      cells:   gridData,
-      savedAt: new Date().toISOString()
-    });
-    toast('ok', 'Garden saved!');
+    await window._fbSaveGarden(ownerUid, payload);
+    dirty = false;
+    const n = plotOrder.length;
+    toast('ok', `Saved ${n} plot${n === 1 ? '' : 's'}`);
+    if (bytes > 600000) toast('info', `Garden is ${(bytes/1024).toFixed(0)} KB of the 1 MB limit.`, 7000);
   } catch(e) {
     const denied = /permission|insufficient/i.test(e.message || '');
     toast('err', denied
@@ -954,6 +1145,11 @@ document.addEventListener('mouseup', () => { painting=false; });
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && isCompanionMode() && focusCellKey) setCompanionFocus(null);
 });
+// Plot edits only reach Firestore on Save, and there are now several plots'
+// worth of work to lose, so warn before leaving with unsaved changes.
+window.addEventListener('beforeunload', e => {
+  if (isOwner && dirty) { e.preventDefault(); e.returnValue = ''; }
+});
 
 function applyTool(key, div) {
   if (!isOwner || isCompanionMode()) return;
@@ -967,12 +1163,14 @@ function applyTool(key, div) {
     toast('info', 'Select a crop from the sidebar first');
     return;
   }
+  markDirty();
   // The cell's contents changed, so its overlay classification may have too.
   if (overlayActive()) applyOverlay();
 }
 
 function resizeGrid() {
   if (!isOwner) return;
+  markDirty();
   gridCols = Math.max(1, Math.min(30, parseInt(document.getElementById('grid-cols').value)||5));
   gridRows = Math.max(1, Math.min(30, parseInt(document.getElementById('grid-rows').value)||5));
   document.getElementById('grid-cols').value = gridCols;
