@@ -329,6 +329,27 @@ input{font-family:inherit}
 .find-btn:hover{background:var(--s)}
 .find-btn.open{background:var(--lb);color:var(--lt);border-color:var(--lbr)}
 
+/* Crop tracker panel */
+.trk-item{border:1px solid var(--b1);border-radius:9px;padding:10px 11px;margin-bottom:9px;background:var(--s)}
+.trk-head{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+.trk-emoji{font-size:20px;flex-shrink:0}
+.trk-name{font-size:13.5px;font-weight:600;color:var(--tp);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.trk-x{width:24px;height:24px;flex-shrink:0;border:1px solid var(--b2);border-radius:6px;background:var(--p);color:var(--rt);font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center}
+.trk-row{display:flex;align-items:center;gap:6px;margin-bottom:6px}
+.trk-row label{font-size:11px;color:var(--tt);width:60px;flex-shrink:0}
+.trk-row input,.trk-row textarea,.trk-row select{
+  flex:1;min-width:0;font-family:inherit;font-size:12px;padding:4px 6px;
+  background:var(--p);color:var(--tp);border:1px solid var(--b2);border-radius:5px;
+}
+.trk-row input:focus,.trk-row textarea:focus{outline:none;border-color:var(--gn)}
+.trk-harvests{margin-top:7px;padding-top:7px;border-top:1px dashed var(--b1)}
+.trk-h{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--ts);padding:3px 0}
+.trk-h .g{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.trk-add{width:100%;padding:6px;font-size:12px;border:1px dashed var(--b2);border-radius:6px;background:transparent;color:var(--ts);cursor:pointer;margin-top:4px}
+.trk-add:hover{background:var(--p);color:var(--gn)}
+.trk-total{font-size:11px;color:var(--gnt);background:var(--gnb);border-radius:8px;padding:2px 8px}
+.trk-empty{font-size:12.5px;color:var(--ts);line-height:1.6;padding:10px 2px}
+
 /* Next season recommendations panel */
 .recs-panel{
   position:fixed;top:62px;right:0;bottom:0;width:320px;
@@ -452,6 +473,10 @@ input{font-family:inherit}
     <button class="recs-btn owner-only" id="recs-btn" onclick="toggleRecsPanel()" style="display:none" title="Next season recommendations">
       <i class="fa-solid fa-lightbulb"></i> Suggestions
     </button>
+    <!-- Crop tracker — owner only -->
+    <button class="recs-btn owner-only" id="trk-btn" onclick="toggleTrackerPanel()" style="display:none" title="Track what you're growing">
+      <i class="fa-solid fa-clipboard-list"></i> Tracker
+    </button>
     <button class="ibtn" onclick="toggleDark()" title="Toggle dark mode">
       <i class="fa-solid fa-moon" id="dticon"></i>
     </button>
@@ -506,6 +531,14 @@ input{font-family:inherit}
   </div>
 
   <!-- Next season recommendations panel -->
+  <div class="recs-panel" id="trk-panel">
+    <div class="recs-panel-head">
+      <span class="recs-panel-title"><i class="fa-solid fa-clipboard-list" style="color:var(--gn);margin-right:6px"></i>Crop Tracker</span>
+      <button class="recs-close-btn" onclick="toggleTrackerPanel()"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    <div class="recs-body" id="trk-body"></div>
+  </div>
+
   <div class="recs-panel" id="recs-panel">
     <div class="recs-panel-head">
       <span class="recs-panel-title"><i class="fa-solid fa-seedling" style="color:var(--gn);margin-right:6px"></i>Next Season Suggestions</span>
@@ -678,6 +711,16 @@ async function loadGarden(uid) {
     activePlotId = id;
   }
 
+  // Crop tracker travels with the garden document.
+  tracker = Array.isArray(saved.tracker) ? saved.tracker.map(t => ({
+    id: t.id || trkId(),
+    name: t.name || '',
+    emoji: t.emoji || '🌱',
+    plantedOn: t.plantedOn || '',
+    notes: t.notes || '',
+    harvests: Array.isArray(t.harvests) ? t.harvests : [],
+  })).filter(t => t.name) : [];
+
   ensureAtLeastOnePlot();
   // A ?plot= parameter wins, so plot links are shareable.
   const wanted = new URLSearchParams(location.search).get('plot');
@@ -795,6 +838,119 @@ function deletePlot() {
 
 function markDirty() { dirty = true; }
 
+// ── Crop tracker ──────────────────────────────────────────
+// Kept per user rather than per plot: you track what you are growing, and a
+// crop often spans plots. Each entry records a planting date, free notes and a
+// harvest log. Stored on the same garden document as the plots.
+let tracker = [];   // [{id, name, emoji, plantedOn, notes, harvests:[{date, weight, quality, notes}]}]
+const trkId = () => 't' + Date.now().toString(36) + Math.random().toString(36).slice(2,5);
+
+function toggleTrackerPanel() {
+  const panel = document.getElementById('trk-panel');
+  const open  = panel.classList.toggle('open');
+  if (open) { document.getElementById('recs-panel')?.classList.remove('open'); renderTracker(); }
+}
+
+function trackedTotal(t) {
+  return (t.harvests || []).reduce((s, h) => s + (parseFloat(h.weight) || 0), 0);
+}
+
+function renderTracker() {
+  const body = document.getElementById('trk-body');
+  if (!body) return;
+
+  // Offer crops planted in any plot that aren't tracked yet.
+  const plantedNames = new Set();
+  for (const id of plotOrder) {
+    for (const c of Object.values(plots[id]?.cells || {})) if (c?.name) plantedNames.add(c.name);
+  }
+  const trackedNames = new Set(tracker.map(t => t.name));
+  const candidates = [...plantedNames].filter(n => !trackedNames.has(n)).sort();
+
+  const addBar = `
+    <div class="trk-row" style="margin-bottom:12px">
+      <select id="trk-add-select" style="flex:1">
+        ${candidates.length
+          ? candidates.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join('')
+          : `<option value="">— nothing new planted to add —</option>`}
+      </select>
+      <button class="trk-add" style="width:auto;margin:0;padding:5px 10px"
+        onclick="addTracked()" ${candidates.length ? '' : 'disabled'}>Track</button>
+    </div>`;
+
+  if (!tracker.length) {
+    body.innerHTML = addBar + `<div class="trk-empty">
+      Nothing tracked yet. Pick a crop you've planted above to record when it went in,
+      keep notes, and log harvests as they come.<br><br>
+      Tracked crops are saved with your garden — press <strong>Save</strong> after making changes.
+    </div>`;
+    return;
+  }
+
+  body.innerHTML = addBar + tracker.map((t, i) => {
+    const total = trackedTotal(t);
+    const harvests = (t.harvests || []).map((h, hi) => `
+      <div class="trk-h">
+        <span class="g">${esc(h.date || '—')} · ${esc(String(h.weight || '?'))} · ${esc(h.quality || '—')}${h.notes ? ' · ' + esc(h.notes) : ''}</span>
+        <button class="trk-x" onclick="removeHarvest(${i},${hi})" title="Remove entry">✕</button>
+      </div>`).join('');
+    return `<div class="trk-item">
+      <div class="trk-head">
+        <span class="trk-emoji">${esc(t.emoji || '🌱')}</span>
+        <span class="trk-name">${esc(t.name)}</span>
+        ${total ? `<span class="trk-total">${total.toFixed(total % 1 ? 1 : 0)} total</span>` : ''}
+        <button class="trk-x" onclick="removeTracked(${i})" title="Stop tracking">✕</button>
+      </div>
+      <div class="trk-row">
+        <label>Planted</label>
+        <input type="date" value="${esc(t.plantedOn || '')}" onchange="setTracked(${i},'plantedOn',this.value)">
+      </div>
+      <div class="trk-row">
+        <label>Notes</label>
+        <textarea rows="2" placeholder="Variety, bed, how it's doing…"
+          onchange="setTracked(${i},'notes',this.value)">${esc(t.notes || '')}</textarea>
+      </div>
+      <div class="trk-harvests">
+        ${harvests || '<div style="font-size:11.5px;color:var(--tt)">No harvests logged.</div>'}
+        <button class="trk-add" onclick="addHarvest(${i})">+ log a harvest</button>
+      </div>
+    </div>`;
+  }).join('');
+}
+
+function addTracked() {
+  const sel = document.getElementById('trk-add-select');
+  const name = sel?.value; if (!name) return;
+  const plant = findPlantByName(name);
+  tracker.push({ id: trkId(), name, emoji: plant?.data.emoji || '🌱',
+                 plantedOn: new Date().toISOString().slice(0,10), notes: '', harvests: [] });
+  markDirty(); renderTracker();
+  toast('ok', `Tracking ${name} — remember to Save`, 3500);
+}
+function setTracked(i, field, val) { if (tracker[i]) { tracker[i][field] = val; markDirty(); } }
+function removeTracked(i) {
+  const t = tracker[i]; if (!t) return;
+  if (!confirm(`Stop tracking ${t.name}? Its harvest log will be removed too.`)) return;
+  tracker.splice(i, 1); markDirty(); renderTracker();
+}
+function addHarvest(i) {
+  const t = tracker[i]; if (!t) return;
+  const date = prompt('Harvest date (YYYY-MM-DD):', new Date().toISOString().slice(0,10));
+  if (!date) return;
+  const weight = prompt('Amount harvested (e.g. 1.5 kg, 12 fruits):', '');
+  if (weight === null) return;
+  const quality = prompt('Quality (good / fair / poor), optional:', 'good') || '';
+  t.harvests = t.harvests || [];
+  t.harvests.push({ date: date.trim(), weight: (weight || '').trim(), quality: quality.trim(), notes: '' });
+  t.harvests.sort((a,b) => (a.date || '').localeCompare(b.date || ''));
+  markDirty(); renderTracker();
+  toast('ok', 'Harvest logged — remember to Save', 3500);
+}
+function removeHarvest(i, hi) {
+  const t = tracker[i]; if (!t || !t.harvests) return;
+  t.harvests.splice(hi, 1); markDirty(); renderTracker();
+}
+
 // ── Save garden ───────────────────────────────────────────
 async function saveGarden() {
   if (!isOwner) { toast('err', 'You can only save your own garden'); return; }
@@ -812,6 +968,7 @@ async function saveGarden() {
     plots:        plots,
     plotOrder:    plotOrder,
     activePlotId: activePlotId,
+    tracker:      tracker,
     // Mirror the active plot at the top level so anything still reading the
     // old single-garden shape keeps working.
     cols:    gridCols,
