@@ -1,0 +1,88 @@
+rules_version = '2';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Garden Planner — Firestore security rules
+//
+// Updated for real Firebase email/password auth. request.auth.uid is now the
+// canonical, stable identity, so the owner checks below are actually enforceable
+// (under the old anonymous-auth model the uid changed every session).
+//
+// Remaining known trade-off: `usernames/{username}` must stay publicly readable
+// because sign-in resolves username -> authEmail BEFORE the user is
+// authenticated. That means the stored authEmail (a real address, when the user
+// supplied a recovery email) is readable by anyone who guesses a username.
+// Eliminating that would require moving the lookup into a Cloud Function.
+// ─────────────────────────────────────────────────────────────────────────────
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Crops: public read; writes restricted to the admin account only.
+    match /crops/{cropId} {
+      allow read: if true;
+      allow write: if request.auth.uid == "vCLr0tkE26Vabd6juiL78VPevs53";
+    }
+
+    // Usernames: public read (needed to resolve username -> authEmail before
+    // sign-in). Create-only, and only when the name is not already taken.
+    // Owner may update their own entry (e.g. when adding a recovery email).
+    match /usernames/{username} {
+      allow read: if true;
+      allow create: if request.auth != null
+                    && !exists(/databases/$(database)/documents/usernames/$(username));
+      allow update: if request.auth != null
+                    && request.auth.uid == resource.data.uid
+                    && request.resource.data.uid == resource.data.uid;
+      allow delete: if false;
+    }
+
+    // Users: private profile. No longer publicly readable — sign-in no longer
+    // needs to read this doc (it used to compare a client-side password hash).
+    match /users/{uid} {
+      allow read:   if request.auth != null && request.auth.uid == uid;
+      allow create: if request.auth != null && request.auth.uid == uid;
+      allow update: if request.auth != null && request.auth.uid == uid;
+      allow delete: if false;
+    }
+
+    // ── Gardens ───────────────────────────────────────────────────────────
+    // Public read powers the shareable "view <username>'s garden" page, so a
+    // separate viewer role is unnecessary — everything is already readable.
+    // Collaboration therefore only adds EDITORS: accounts the owner has listed
+    // in the garden's `editors` array may change its contents.
+    //
+    // The security-critical part is the second update branch. An editor is
+    // allowed to rewrite plots and tracker data, but must NOT be able to:
+    //   * change `editors`   — otherwise an editor could remove the owner's
+    //                          collaborators, add accomplices, or lock the
+    //                          owner out of their own garden
+    //   * change `editorInfo`— the display names shown in the share panel
+    //   * change `uid`       — otherwise ownership itself could be reassigned
+    // Those three fields are pinned to their existing values, so an editor can
+    // only ever touch garden content. Only the owner may change sharing.
+    //
+    // `.get(field, default)` is used so documents saved before sharing existed
+    // (which have no `editors` field) still evaluate instead of erroring.
+    match /gardens/{uid} {
+      allow read: if true;
+
+      // Only the owner can create or delete their garden document.
+      allow create, delete: if request.auth != null && request.auth.uid == uid;
+
+      allow update: if request.auth != null && (
+        // Owner: unrestricted, including managing the editor list.
+        request.auth.uid == uid
+        ||
+        // Editor: content only, with sharing and ownership pinned.
+        (
+          request.auth.uid in resource.data.get('editors', [])
+          && request.resource.data.get('editors', [])
+             == resource.data.get('editors', [])
+          && request.resource.data.get('editorInfo', {})
+             == resource.data.get('editorInfo', {})
+          && request.resource.data.get('uid', uid) == resource.data.get('uid', uid)
+        )
+      );
+    }
+  }
+}

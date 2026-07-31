@@ -473,9 +473,13 @@ input{font-family:inherit}
     <button class="recs-btn owner-only" id="recs-btn" onclick="toggleRecsPanel()" style="display:none" title="Next season recommendations">
       <i class="fa-solid fa-lightbulb"></i> Suggestions
     </button>
-    <!-- Crop tracker — owner only -->
+    <!-- Crop tracker — anyone with edit access -->
     <button class="recs-btn owner-only" id="trk-btn" onclick="toggleTrackerPanel()" style="display:none" title="Track what you're growing">
       <i class="fa-solid fa-clipboard-list"></i> Tracker
+    </button>
+    <!-- Sharing — strictly the owner -->
+    <button class="recs-btn share-only" id="share-btn" onclick="toggleSharePanel()" style="display:none" title="Who can edit this garden">
+      <i class="fa-solid fa-user-group"></i> Share
     </button>
     <button class="ibtn" onclick="toggleDark()" title="Toggle dark mode">
       <i class="fa-solid fa-moon" id="dticon"></i>
@@ -539,6 +543,14 @@ input{font-family:inherit}
     <div class="recs-body" id="trk-body"></div>
   </div>
 
+  <div class="recs-panel" id="share-panel">
+    <div class="recs-panel-head">
+      <span class="recs-panel-title"><i class="fa-solid fa-user-group" style="color:var(--gn);margin-right:6px"></i>Who can edit</span>
+      <button class="recs-close-btn" onclick="toggleSharePanel()"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    <div class="recs-body" id="share-body"></div>
+  </div>
+
   <div class="recs-panel" id="recs-panel">
     <div class="recs-panel-head">
       <span class="recs-panel-title"><i class="fa-solid fa-seedling" style="color:var(--gn);margin-right:6px"></i>Next Season Suggestions</span>
@@ -567,8 +579,19 @@ let tool         = 'draw';
 let isDark       = false;
 let activeZone   = 6;
 let painting     = false;
-let isOwner      = false;      // set after auth resolves
+let isOwner      = false;      // this garden belongs to the signed-in user
 let ownerUid     = null;       // uid of the garden owner
+
+// ── Sharing ───────────────────────────────────────────────
+// Gardens are already world-readable (that is what the share-by-username view
+// relies on), so collaboration only adds editors. `editors` holds uids that the
+// owner has granted write access; the security rule pins that array so an
+// editor can never alter it. Only the owner sees the share panel.
+let editors    = [];           // [uid, ...]
+let editorInfo = {};           // uid -> { username }
+let isEditor   = false;        // signed-in user appears in `editors`
+let loadedSavedAt = '';        // savedAt we loaded, for conflict detection
+const canEdit  = () => isOwner || isEditor;
 
 // ── Plots ─────────────────────────────────────────────────
 // Plots live in a map on the single gardens/{uid} document rather than a
@@ -639,8 +662,11 @@ async function doSignOut() {
 
 // ── Show/hide owner vs visitor controls ──────────────────
 function applyOwnerUI() {
-  document.querySelectorAll('.owner-only').forEach(el => el.style.display = isOwner ? '' : 'none');
-  document.querySelectorAll('.visitor-only').forEach(el => el.style.display = !isOwner ? '' : 'none');
+  // "owner-only" controls are really "may edit" controls — editors get them too.
+  document.querySelectorAll('.owner-only').forEach(el => el.style.display = canEdit() ? '' : 'none');
+  document.querySelectorAll('.visitor-only').forEach(el => el.style.display = !canEdit() ? '' : 'none');
+  // Sharing is genuinely owner-only: editors must not manage the editor list.
+  document.querySelectorAll('.share-only').forEach(el => el.style.display = isOwner ? '' : 'none');
   renderPlotBar();
 
   // Show user pill + sign-out for any logged-in user visiting someone else's garden
@@ -664,6 +690,8 @@ function applyOwnerUI() {
   const legendText = document.getElementById('legend-text');
   if (isOwner) {
     legendText.textContent = 'Draw: pick a crop then click or drag cells  ·  Erase: click or drag to clear  ·  Companions: click a cell to highlight relationships  ·  Resize with the number inputs above';
+  } else if (isEditor) {
+    legendText.textContent = `You have edit access to ${TARGET_USERNAME}'s garden — draw, erase and resize as usual, then Save. Only ${TARGET_USERNAME} can change who has access.`;
   } else {
     legendText.textContent = `Viewing ${TARGET_USERNAME}'s garden — Companions: click a cell to highlight relationships  ·  Sign in to edit your own`;
   }
@@ -710,6 +738,11 @@ async function loadGarden(uid) {
     plotOrder = [id];
     activePlotId = id;
   }
+
+  // Sharing state, and the baseline used to detect a concurrent save.
+  loadedSavedAt = saved.savedAt || '';
+  editors    = Array.isArray(saved.editors) ? saved.editors.filter(Boolean) : [];
+  editorInfo = (saved.editorInfo && typeof saved.editorInfo === 'object') ? saved.editorInfo : {};
 
   // Crop tracker travels with the garden document.
   tracker = Array.isArray(saved.tracker) ? saved.tracker.map(t => ({
@@ -776,14 +809,14 @@ function renderPlotBar() {
   const sel = document.getElementById('plot-select');
   if (!bar || !sel) return;
   // Hide the switcher entirely when a visitor has only one plot to look at.
-  if (!isOwner && plotOrder.length <= 1) { bar.style.display = 'none'; return; }
+  if (!canEdit() && plotOrder.length <= 1) { bar.style.display = 'none'; return; }
   bar.style.display = '';
   sel.innerHTML = plotOrder.map(id => {
     const p = plots[id];
     const n = Object.keys(p.cells || {}).length;
     return `<option value="${esc(id)}"${id === activePlotId ? ' selected' : ''}>${esc(p.name)} (${n})</option>`;
   }).join('');
-  bar.querySelectorAll('.owner-only').forEach(b => b.style.display = isOwner ? '' : 'none');
+  bar.querySelectorAll('.owner-only').forEach(b => b.style.display = canEdit() ? '' : 'none');
 }
 
 // ── Plot actions ──────────────────────────────────────────
@@ -796,7 +829,7 @@ function switchPlot(id) {
 }
 
 function newPlot() {
-  if (!isOwner) return;
+  if (!canEdit()) return;
   if (plotOrder.length >= MAX_PLOTS) {
     toast('err', `You can have at most ${MAX_PLOTS} plots.`, 5000); return;
   }
@@ -812,7 +845,7 @@ function newPlot() {
 }
 
 function renamePlot() {
-  if (!isOwner) return;
+  if (!canEdit()) return;
   const p = plots[activePlotId]; if (!p) return;
   const name = (prompt('Rename this plot:', p.name) || '').trim();
   if (!name || name === p.name) return;
@@ -823,7 +856,7 @@ function renamePlot() {
 }
 
 function deletePlot() {
-  if (!isOwner) return;
+  if (!canEdit()) return;
   if (plotOrder.length <= 1) { toast('err', 'You need at least one plot.'); return; }
   const p = plots[activePlotId]; if (!p) return;
   const n = Object.keys(p.cells || {}).length;
@@ -951,16 +984,110 @@ function removeHarvest(i, hi) {
   t.harvests.splice(hi, 1); markDirty(); renderTracker();
 }
 
+// ── Sharing (owner only) ──────────────────────────────────
+function toggleSharePanel() {
+  if (!isOwner) return;
+  const panel = document.getElementById('share-panel');
+  const open  = panel.classList.toggle('open');
+  if (open) {
+    document.getElementById('recs-panel')?.classList.remove('open');
+    document.getElementById('trk-panel')?.classList.remove('open');
+    renderShare();
+  }
+}
+
+function renderShare() {
+  const body = document.getElementById('share-body');
+  if (!body) return;
+  const rows = editors.map((uid, i) => {
+    const name = editorInfo[uid]?.username || uid;
+    return `<div class="trk-item" style="padding:8px 10px">
+      <div class="trk-head" style="margin:0">
+        <span class="trk-emoji">👤</span>
+        <span class="trk-name">${esc(name)}</span>
+        <span class="trk-total">editor</span>
+        <button class="trk-x" onclick="removeEditor(${i})" title="Remove access">✕</button>
+      </div>
+    </div>`;
+  }).join('');
+
+  body.innerHTML = `
+    <div class="trk-empty" style="padding-top:0">
+      Anyone can already <strong>view</strong> this garden from its link. Adding
+      someone here lets them <strong>edit</strong> it — draw, resize, manage plots
+      and the tracker. They cannot change this list.
+    </div>
+    <div class="trk-row" style="margin-bottom:12px">
+      <input id="share-username" placeholder="username to add" style="flex:1"
+        oninput="this.value=this.value.replace(/[^a-zA-Z0-9_]/g,'').toLowerCase()">
+      <button class="trk-add" style="width:auto;margin:0;padding:5px 10px" onclick="addEditor()">Add</button>
+    </div>
+    <div id="share-msg"></div>
+    <div class="recs-section-title">Editors (${editors.length})</div>
+    ${rows || '<div class="trk-empty">Nobody else can edit this garden.</div>'}
+    <div class="trk-empty" style="font-size:11.5px;color:var(--tt);margin-top:10px">
+      Changes here are saved with the garden — press <strong>Save</strong> when done.
+    </div>`;
+}
+
+function shareMsg(kind, msg) {
+  const el = document.getElementById('share-msg');
+  if (el) el.innerHTML = `<div class="trk-empty" style="color:var(--${kind === 'err' ? 'rt' : 'gnt'})">${esc(msg)}</div>`;
+}
+
+async function addEditor() {
+  if (!isOwner) return;
+  const input = document.getElementById('share-username');
+  const name  = (input?.value || '').trim().toLowerCase();
+  if (!name) { shareMsg('err', 'Enter a username.'); return; }
+  if (name === (TARGET_USERNAME || '').toLowerCase()) { shareMsg('err', 'That is you — you already own this garden.'); return; }
+  try {
+    const uid = await window._fbResolveUsername(name);
+    if (!uid) { shareMsg('err', `No account called “${name}”.`); return; }
+    if (uid === ownerUid) { shareMsg('err', 'That is the owner of this garden.'); return; }
+    if (editors.includes(uid)) { shareMsg('err', `${name} already has edit access.`); return; }
+    editors = [...editors, uid];
+    editorInfo = { ...editorInfo, [uid]: { username: name } };
+    markDirty(); renderShare();
+    toast('ok', `${name} can now edit — remember to Save`, 4500);
+  } catch(e) {
+    shareMsg('err', 'Lookup failed: ' + e.message);
+  }
+}
+
+function removeEditor(i) {
+  if (!isOwner) return;
+  const uid  = editors[i];
+  const name = editorInfo[uid]?.username || uid;
+  if (!confirm(`Remove ${name}'s edit access?`)) return;
+  editors = editors.filter((_, j) => j !== i);
+  const next = { ...editorInfo }; delete next[uid];
+  editorInfo = next;
+  markDirty(); renderShare();
+  toast('ok', `Removed ${name} — remember to Save`, 4500);
+}
+
 // ── Save garden ───────────────────────────────────────────
 async function saveGarden() {
-  if (!isOwner) { toast('err', 'You can only save your own garden'); return; }
-  // The security rule matches request.auth.uid against the garden id, so a
-  // half-restored session would fail server-side with an opaque error.
+  if (!canEdit()) { toast('err', 'You do not have edit access to this garden'); return; }
+  // The security rule checks request.auth, so a half-restored session would
+  // fail server-side with an opaque error.
   if (!window._auth?.currentUser) {
     toast('err', 'Your sign-in session is not ready yet — reload the page and try again.', 7000);
     return;
   }
   syncActivePlot();   // fold the on-screen grid back into the active plot
+
+  // Saves replace the whole document, so if someone else has saved since we
+  // loaded, writing now would silently discard their work. Check first.
+  try {
+    const fresh = await window._fbLoadGarden(ownerUid);
+    const remoteAt = fresh.exists() ? (fresh.data().savedAt || '') : '';
+    if (loadedSavedAt && remoteAt && remoteAt !== loadedSavedAt) {
+      toast('err', 'Someone else saved this garden after you opened it. Reload to get their changes — saving now would overwrite them.', 12000);
+      return;
+    }
+  } catch(e) { /* if the check fails, fall through and let the write decide */ }
 
   const payload = {
     uid:      ownerUid,
@@ -969,6 +1096,10 @@ async function saveGarden() {
     plotOrder:    plotOrder,
     activePlotId: activePlotId,
     tracker:      tracker,
+    // Sharing fields are echoed back unchanged. The rule pins them for
+    // editors, so an editor's save must not alter them.
+    editors:    editors,
+    editorInfo: editorInfo,
     // Mirror the active plot at the top level so anything still reading the
     // old single-garden shape keeps working.
     cols:    gridCols,
@@ -990,13 +1121,14 @@ async function saveGarden() {
   try {
     await window._fbSaveGarden(ownerUid, payload);
     dirty = false;
+    loadedSavedAt = payload.savedAt;   // our write is now the baseline
     const n = plotOrder.length;
     toast('ok', `Saved ${n} plot${n === 1 ? '' : 's'}`);
     if (bytes > 600000) toast('info', `Garden is ${(bytes/1024).toFixed(0)} KB of the 1 MB limit.`, 7000);
   } catch(e) {
     const denied = /permission|insufficient/i.test(e.message || '');
     toast('err', denied
-      ? 'Save failed: this garden belongs to another account. Sign in as its owner to edit it.'
+      ? 'Save failed: you no longer have edit access to this garden.'
       : 'Save failed: ' + e.message, 8000);
   } finally {
     btn.disabled = false;
@@ -1012,8 +1144,8 @@ function renderSidebar() {
   if (!fl.length) { list.innerHTML='<div style="padding:1.5rem;text-align:center;color:var(--tt);font-size:13px">No crops found</div>'; return; }
   list.innerHTML = fl.map(p => {
     const sel = selectedCrop && selectedCrop.name === p.data.name;
-    const dis = !isOwner ? ' disabled' : '';
-    const click = isOwner ? `onclick="selectCrop('${esc(p.data.emoji)}','${esc(p.data.name)}')"` : '';
+    const dis = !canEdit() ? ' disabled' : '';
+    const click = canEdit() ? `onclick="selectCrop('${esc(p.data.emoji)}','${esc(p.data.name)}')"` : '';
     return `<div class="crop-item${sel?' selected':''}${dis}" ${click}>
       <span class="crop-emoji">${esc(p.data.emoji)}</span>
       <span class="crop-name">${esc(p.data.name)}</span>
@@ -1021,7 +1153,7 @@ function renderSidebar() {
   }).join('');
 }
 function selectCrop(emoji, name) {
-  if (!isOwner) return;
+  if (!canEdit()) return;
   // Companion mode owns the click, so leave it when picking a crop to draw.
   // The passive planting/harvest overlays can stay on while drawing.
   if (isCompanionMode()) setOverlayMode('none');
@@ -1033,7 +1165,7 @@ function selectCrop(emoji, name) {
 }
 
 function setTool(t) {
-  if (!isOwner) return;
+  if (!canEdit()) return;
   tool = t;
   document.getElementById('tool-draw').classList.toggle('active', t==='draw');
   document.getElementById('tool-erase').classList.toggle('active', t==='erase');
@@ -1256,13 +1388,13 @@ function renderGrid() {
       const key = `${r},${c}`;
       const cell = gridData[key];
       const div = document.createElement('div');
-      div.className = 'gcell' + (isOwner ? ' editable' : '') + (isOwner && tool==='erase' ? ' eh' : '');
+      div.className = 'gcell' + (canEdit() ? ' editable' : '') + (canEdit() && tool==='erase' ? ' eh' : '');
       div.dataset.key = key;
       if (cell) div.innerHTML = `<span>${esc(cell.emoji)}</span><div class="gcell-label">${esc(cell.name)}</div>`;
 
-      // Owner draw/erase events. Painting stays available in the passive
-      // planting/harvest overlays; only companion mode needs the click.
-      if (isOwner) {
+      // Draw/erase events for anyone with edit access. Painting stays available
+      // in the passive planting/harvest overlays; only companion mode needs the click.
+      if (canEdit()) {
         div.addEventListener('mousedown', e => {
           if (isCompanionMode()) return;
           e.preventDefault(); painting=true; applyTool(key, div);
@@ -1305,11 +1437,11 @@ document.addEventListener('keydown', e => {
 // Plot edits only reach Firestore on Save, and there are now several plots'
 // worth of work to lose, so warn before leaving with unsaved changes.
 window.addEventListener('beforeunload', e => {
-  if (isOwner && dirty) { e.preventDefault(); e.returnValue = ''; }
+  if (canEdit() && dirty) { e.preventDefault(); e.returnValue = ''; }
 });
 
 function applyTool(key, div) {
-  if (!isOwner || isCompanionMode()) return;
+  if (!canEdit() || isCompanionMode()) return;
   if (tool==='erase') {
     delete gridData[key];
     div.innerHTML = '';
@@ -1326,7 +1458,7 @@ function applyTool(key, div) {
 }
 
 function resizeGrid() {
-  if (!isOwner) return;
+  if (!canEdit()) return;
   markDirty();
   gridCols = Math.max(1, Math.min(30, parseInt(document.getElementById('grid-cols').value)||5));
   gridRows = Math.max(1, Math.min(30, parseInt(document.getElementById('grid-rows').value)||5));
@@ -1609,6 +1741,9 @@ async function boot() {
   document.getElementById('loading-msg').textContent = 'Loading garden…';
   try { await loadGarden(ownerUid); } catch(e) { toast('err','Could not load garden: '+e.message, 6000); }
 
+  // Edit access can only be resolved once the garden's editor list is loaded.
+  isEditor = !!(cu && !isOwner && editors.includes(cu.uid));
+
   // 5. Show app
   document.getElementById('loading-overlay').classList.add('hidden');
   const appEl = document.getElementById('app');
@@ -1634,6 +1769,8 @@ async function boot() {
 
   if (isOwner && Object.keys(gridData).length === 0) {
     toast('info', 'Your garden is empty — pick a crop and start drawing!');
+  } else if (isEditor) {
+    toast('ok', `You have edit access to ${TARGET_USERNAME}'s garden`, 5000);
   } else if (!isOwner) {
     toast('info', `Viewing ${TARGET_USERNAME}'s garden`);
   } else {
